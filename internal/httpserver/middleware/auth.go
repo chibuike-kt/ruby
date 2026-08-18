@@ -36,6 +36,7 @@ func TempAuth(pool *pgxpool.Pool) func(http.Handler) http.Handler {
 					httpjson.WriteError(w, http.StatusUnauthorized, "unknown user")
 					return
 				}
+				SetServerError(r.Context(), err)
 				httpjson.WriteError(w, http.StatusInternalServerError, "something went wrong, please try again")
 				return
 			}

@@ -41,7 +41,7 @@ func (s *Server) recordPayment(w http.ResponseWriter, r *http.Request) {
 
 	result, err := s.Payments.Record(r.Context(), userID, debtID, money.New(req.AmountMinor, currency), idempotencyKey)
 	if err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 

@@ -21,7 +21,7 @@ func (s *Server) summary(w http.ResponseWriter, r *http.Request) {
 
 	entries, err := ledger.ListByUser(r.Context(), s.Pool, userID)
 	if err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 
