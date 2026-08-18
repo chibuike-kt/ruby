@@ -7,6 +7,7 @@ import (
 	"github.com/chibuike-kt/ruby/internal/customer"
 	"github.com/chibuike-kt/ruby/internal/debt"
 	"github.com/chibuike-kt/ruby/internal/httpserver/httpjson"
+	"github.com/chibuike-kt/ruby/internal/httpserver/middleware"
 	"github.com/chibuike-kt/ruby/internal/money"
 	"github.com/chibuike-kt/ruby/internal/payment"
 )
@@ -15,7 +16,7 @@ import (
 // It never invents new business rules — it only reads the errors those
 // services already define and picks the matching status code (spec
 // §37: no unexplained technical errors).
-func writeServiceError(w http.ResponseWriter, err error) {
+func writeServiceError(w http.ResponseWriter, r *http.Request, err error) {
 	var ambiguous *customer.AmbiguousError
 	var overpay *payment.OverpaymentError
 	var idemConflict *payment.IdempotencyConflictError
@@ -49,10 +50,12 @@ func writeServiceError(w http.ResponseWriter, err error) {
 		errors.Is(err, payment.ErrIdempotencyKeyRequired),
 		errors.Is(err, customer.ErrInvalidName),
 		errors.Is(err, customer.ErrNoIdentitySignal),
+		errors.Is(err, customer.ErrDuplicateNameRequiresSignal),
 		errors.Is(err, money.ErrCurrencyMismatch):
 		httpjson.WriteError(w, http.StatusBadRequest, err.Error())
 
 	default:
+		middleware.SetServerError(r.Context(), err)
 		httpjson.WriteError(w, http.StatusInternalServerError, "something went wrong while recording that, your existing records are safe")
 	}
 }

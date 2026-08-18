@@ -62,6 +62,27 @@ func TestListCustomers_ScopedToUser(t *testing.T) {
 	}
 }
 
+// Regression test: creating a same-named customer with no phone/alias
+// (decisions.md #8) must map to 400, not fall through to the generic
+// 500 handler — this was the actual bug behind the /api/customers 500
+// report once the underlying DB connectivity issue was fixed, since
+// customer.ErrDuplicateNameRequiresSignal wasn't wired into
+// writeServiceError's status mapping.
+func TestCreateCustomer_DuplicateNameNoSignal_Returns400NotServerError(t *testing.T) {
+	env := newTestEnv(t)
+	userID := env.newUser(t, "+2348070000007")
+
+	first := env.do(t, http.MethodPost, "/api/customers", userID, map[string]any{"name": "Chinedu"}, nil)
+	if first.Code != http.StatusCreated {
+		t.Fatalf("first create: got status %d, want 201, body=%s", first.Code, first.Body.String())
+	}
+
+	second := env.do(t, http.MethodPost, "/api/customers", userID, map[string]any{"name": "Chinedu"}, nil)
+	if second.Code != http.StatusBadRequest {
+		t.Fatalf("got status %d, want 400, body=%s", second.Code, second.Body.String())
+	}
+}
+
 func TestGetCustomer_CrossUserAccessDenied(t *testing.T) {
 	env := newTestEnv(t)
 	owner := env.newUser(t, "+2348070000005")

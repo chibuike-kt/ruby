@@ -25,7 +25,7 @@ func (s *Server) createCustomer(w http.ResponseWriter, r *http.Request) {
 
 	c, err := s.Customers.Create(r.Context(), userID, req.Name, req.PhoneNumber, req.Alias)
 	if err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 	httpjson.Write(w, http.StatusCreated, toCustomerResponse(c))
@@ -36,7 +36,7 @@ func (s *Server) listCustomers(w http.ResponseWriter, r *http.Request) {
 
 	customers, err := customer.ListByUser(r.Context(), s.Pool, userID)
 	if err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 	httpjson.Write(w, http.StatusOK, toCustomerResponses(customers))
@@ -53,7 +53,7 @@ func (s *Server) getCustomer(w http.ResponseWriter, r *http.Request) {
 
 	c, err := customer.GetByID(r.Context(), s.Pool, userID, id)
 	if err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 	httpjson.Write(w, http.StatusOK, toCustomerResponse(c))
