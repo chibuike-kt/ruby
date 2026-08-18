@@ -10,11 +10,13 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/redis/go-redis/v9"
 )
 
 // Matches the docker-compose.yml / .env.example local dev default — not
 // a real secret.
 const defaultTestDatabaseURL = "postgres://ruby:ruby@localhost:5432/ruby?sslmode=disable" //nolint:gosec
+const defaultTestRedisURL = "redis://localhost:6379/0"
 
 // Open returns a pool for DATABASE_URL (falling back to the local
 // docker-compose default), skipping the test if no database is
@@ -57,8 +59,8 @@ func Truncate(t *testing.T, pool *pgxpool.Pool) {
 }
 
 // CreateUser inserts a minimal user row and returns its id. The users
-// table isn't owned by any Slice 1 package (account/auth is out of
-// scope), so fixtures live here rather than in a domain package.
+// table isn't owned by any Slice 1 domain package (internal/account only
+// reads it, for auth resolution), so fixtures live here instead.
 func CreateUser(t *testing.T, pool *pgxpool.Pool, phone string) int64 {
 	t.Helper()
 	var id int64
@@ -69,4 +71,52 @@ func CreateUser(t *testing.T, pool *pgxpool.Pool, phone string) int64 {
 		t.Fatalf("dbtest: create user failed: %v", err)
 	}
 	return id
+}
+
+// InsertMessage inserts a raw row into the messages table, bypassing any
+// service layer — no package owns webhook message persistence yet
+// (that's Slice 2's internal/whatsapp). It's used to exercise the
+// provider_message_id unique index directly, e.g. to prove Postgres
+// still catches a duplicate event when Redis's dedup fast-path misses.
+func InsertMessage(t *testing.T, pool *pgxpool.Pool, userID int64, providerMessageID string) error {
+	t.Helper()
+	_, err := pool.Exec(context.Background(), `
+		INSERT INTO messages (user_id, provider_message_id, direction, message_type)
+		VALUES ($1, $2, 'INBOUND', 'TEXT')
+	`, userID, providerMessageID)
+	return err
+}
+
+// OpenRedis returns a client for REDIS_URL (falling back to the local
+// docker-compose default), skipping the test if no Redis is reachable.
+// FlushDB gives each test a clean keyspace — Slice 1's Truncate resets
+// Postgres identity sequences per test, so without a matching flush,
+// Redis keys built from a reused user_id (e.g. rate-limit or dedup
+// counters) could leak state between otherwise-isolated tests.
+func OpenRedis(t *testing.T) *redis.Client {
+	t.Helper()
+
+	url := os.Getenv("REDIS_URL")
+	if url == "" {
+		url = defaultTestRedisURL
+	}
+
+	opt, err := redis.ParseURL(url)
+	if err != nil {
+		t.Skipf("dbtest: invalid REDIS_URL: %v", err)
+	}
+
+	ctx := context.Background()
+	client := redis.NewClient(opt)
+	if err := client.Ping(ctx).Err(); err != nil {
+		_ = client.Close()
+		t.Skipf("dbtest: redis not reachable: %v", err)
+	}
+	if err := client.FlushDB(ctx).Err(); err != nil {
+		_ = client.Close()
+		t.Fatalf("dbtest: redis flushdb failed: %v", err)
+	}
+	t.Cleanup(func() { _ = client.Close() })
+
+	return client
 }
