@@ -1,8 +1,8 @@
 package money
 
 import (
-		"errors"
-		"testing"
+	"errors"
+	"testing"
 )
 
 func TestNewFromMajor(t *testing.T) {
