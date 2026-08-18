@@ -12,11 +12,15 @@ build:
 run:
 	go run ./cmd/api
 
+# -p 1: internal packages run integration tests against one shared
+# Postgres instance (see internal/dbtest), not per-package databases, so
+# package test binaries must not run concurrently or they'll truncate
+# each other's fixtures mid-test.
 test:
-	go test ./...
+	go test -p 1 ./...
 
 test-race:
-	go test -race -shuffle=on ./...
+	go test -race -shuffle=on -p 1 ./...
 
 lint:
 	golangci-lint run
