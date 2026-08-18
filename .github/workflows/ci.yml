@@ -89,7 +89,9 @@ jobs:
         run: go build -trimpath -o /dev/null ./...
 
       - name: Test with race detector
-        run: go test -race -shuffle=on -coverprofile=coverage.out ./...
+        # -p 1: package test binaries share one Postgres instance
+        # (internal/dbtest) and must not truncate it concurrently.
+        run: go test -race -shuffle=on -p 1 -coverprofile=coverage.out ./...
 
       - name: Upload coverage
         uses: actions/upload-artifact@v4
