@@ -1,0 +1,23 @@
+# Binaries
+/dist/
+/bin/
+keel
+*.exe
+
+# Go
+*.test
+*.out
+/vendor/
+go.work
+go.work.sum
+
+# Env & secrets
+.env
+.env.*
+!.env.example
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
