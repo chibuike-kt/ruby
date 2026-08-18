@@ -18,12 +18,24 @@ type requestInfoContextKey struct{}
 type requestInfo struct {
 	userID    int64
 	hasUserID bool
+	err       error
 }
 
 func setRequestUserID(ctx context.Context, userID int64) {
 	if info, ok := ctx.Value(requestInfoContextKey{}).(*requestInfo); ok {
 		info.userID = userID
 		info.hasUserID = true
+	}
+}
+
+// SetServerError attaches the underlying Go error behind a 5xx response
+// so RequestLogger can log it. Call this immediately before writing any
+// 5xx response — a bare status code isn't diagnosable on its own; that
+// exact gap is what made a real 500 (a misconfigured DATABASE_URL)
+// silent in the logs.
+func SetServerError(ctx context.Context, err error) {
+	if info, ok := ctx.Value(requestInfoContextKey{}).(*requestInfo); ok {
+		info.err = err
 	}
 }
 
@@ -58,6 +70,14 @@ func RequestLogger(logger *slog.Logger) func(http.Handler) http.Handler {
 			}
 			if info.hasUserID {
 				fields = append(fields, "user_id", info.userID)
+			}
+
+			if rec.status >= http.StatusInternalServerError {
+				if info.err != nil {
+					fields = append(fields, "error", info.err.Error())
+				}
+				logger.Error("request", fields...)
+				return
 			}
 			logger.Info("request", fields...)
 		})

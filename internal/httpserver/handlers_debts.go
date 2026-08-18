@@ -43,7 +43,7 @@ func (s *Server) createDebt(w http.ResponseWriter, r *http.Request) {
 
 	d, err := s.Debts.Create(r.Context(), userID, req.CustomerID, money.New(req.AmountMinor, currency), req.Description, dueDate)
 	if err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 
@@ -56,7 +56,7 @@ func (s *Server) listDebts(w http.ResponseWriter, r *http.Request) {
 
 	debts, err := s.Debts.ListOutstanding(r.Context(), userID)
 	if err != nil {
-		writeServiceError(w, err)
+		writeServiceError(w, r, err)
 		return
 	}
 	httpjson.Write(w, http.StatusOK, toDebtResponses(debts))
