@@ -20,7 +20,7 @@ func TestNewFromMajor_UnsupportedCurrency(t *testing.T) {
 }
 
 func TestSub_PartialPayment(t *testing.T) {
-	debt := New(12000000, NGN) // 120,000
+	debt := New(12000000, NGN)   // 120,000
 	payment := New(5000000, NGN) // 50,000
 	outstanding, err := debt.Sub(payment)
 	if err != nil {

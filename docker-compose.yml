@@ -6,6 +6,11 @@ services:
       POSTGRES_USER: ruby
       POSTGRES_PASSWORD: ruby
       POSTGRES_DB: ruby
+      # Postgres 18's image expects a version-specific data subdirectory;
+      # a fresh named volume on some Docker Desktop hosts (e.g. Windows)
+      # can contain a stray lost+found that makes it think data already
+      # exists at the mount root. Nesting PGDATA avoids that false positive.
+      PGDATA: /var/lib/postgresql/data/pgdata
     ports:
       - "5432:5432"
     volumes:
