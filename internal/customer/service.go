@@ -12,6 +12,13 @@ import (
 var ErrInvalidName = errors.New("customer: name is required")
 var ErrNoIdentitySignal = errors.New("customer: no identity signal provided")
 
+// ErrDuplicateNameRequiresSignal is returned instead of silently
+// creating an indistinguishable duplicate (decisions.md #8): if a
+// customer with this exact name already exists for the user and the
+// request supplies neither a phone number nor an alias, Create rejects
+// it up front rather than letting Resolve untangle it later.
+var ErrDuplicateNameRequiresSignal = errors.New("customer: a customer with this name already exists — provide a phone number or alias to tell them apart")
+
 type Service struct {
 	q db.Querier
 }
@@ -25,6 +32,17 @@ func (s *Service) Create(ctx context.Context, userID int64, name string, phone, 
 	if name == "" {
 		return Customer{}, ErrInvalidName
 	}
+
+	if trimmed(phone) == "" && trimmed(alias) == "" {
+		existing, err := FindByName(ctx, s.q, userID, name)
+		if err != nil {
+			return Customer{}, err
+		}
+		if len(existing) > 0 {
+			return Customer{}, ErrDuplicateNameRequiresSignal
+		}
+	}
+
 	return Create(ctx, s.q, Customer{UserID: userID, Name: name, PhoneNumber: phone, Alias: alias})
 }
 

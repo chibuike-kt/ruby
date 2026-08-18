@@ -2,35 +2,64 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
+
+	"github.com/chibuike-kt/ruby/internal/config"
+	"github.com/chibuike-kt/ruby/internal/customer"
+	"github.com/chibuike-kt/ruby/internal/db"
+	"github.com/chibuike-kt/ruby/internal/debt"
+	"github.com/chibuike-kt/ruby/internal/httpserver"
+	"github.com/chibuike-kt/ruby/internal/payment"
 )
 
 func main() {
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8080"
+	cfg, err := config.Load()
+	if err != nil {
+		log.Fatalf("config error: %v", err)
 	}
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("ok"))
-	})
+	ctx := context.Background()
 
-	srv := &http.Server{
-		Addr:              ":" + port,
-		Handler:           mux,
+	pool, err := db.NewPool(ctx, cfg.DatabaseURL)
+	if err != nil {
+		log.Fatalf("postgres connection error: %v", err)
+	}
+	defer pool.Close()
+
+	redisClient, err := db.NewRedisClient(cfg.RedisURL)
+	if err != nil {
+		log.Fatalf("redis connection error: %v", err)
+	}
+	defer func() { _ = redisClient.Close() }()
+
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+
+	server := &httpserver.Server{
+		Pool:               pool,
+		Redis:              redisClient,
+		Customers:          customer.NewService(pool),
+		Debts:              debt.NewService(pool),
+		Payments:           payment.NewService(pool),
+		RateLimitPerMinute: cfg.RateLimitPerMinute,
+		Logger:             logger,
+	}
+
+	httpSrv := &http.Server{
+		Addr:              ":" + cfg.Port,
+		Handler:           httpserver.NewRouter(server),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
 	go func() {
-		log.Printf("listening on :%s", port)
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		log.Printf("listening on :%s", cfg.Port)
+		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Fatalf("server error: %v", err)
 		}
 	}()
@@ -39,9 +68,9 @@ func main() {
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 	<-stop
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if err := srv.Shutdown(ctx); err != nil {
+	if err := httpSrv.Shutdown(shutdownCtx); err != nil {
 		log.Fatalf("shutdown error: %v", err)
 	}
 }

@@ -1,6 +1,9 @@
 package money
 
-import "testing"
+import (
+	"errors"
+	"testing"
+)
 
 func TestNewFromMajor(t *testing.T) {
 	m, err := NewFromMajor(75000, NGN)
@@ -59,7 +62,7 @@ func TestAdd_CurrencyMismatch(t *testing.T) {
 	ngn := New(1000, NGN)
 	usd := New(1000, USD)
 	_, err := ngn.Add(usd)
-	if err != ErrCurrencyMismatch {
+	if !errors.Is(err, ErrCurrencyMismatch) {
 		t.Fatalf("got %v, want ErrCurrencyMismatch", err)
 	}
 }

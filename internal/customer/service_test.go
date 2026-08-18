@@ -39,6 +39,138 @@ func TestCreate_EmptyNameRejected(t *testing.T) {
 	}
 }
 
+// decisions.md #8: prevent an indistinguishable duplicate at creation
+// time rather than only resolving it later.
+func TestCreate_DuplicateName_NoSignal_Rejected(t *testing.T) {
+	pool := dbtest.Open(t)
+	userID := dbtest.CreateUser(t, pool, "+2348010000012")
+	svc := customer.NewService(pool)
+	ctx := context.Background()
+
+	if _, err := svc.Create(ctx, userID, "Chinedu", nil, nil); err != nil {
+		t.Fatalf("first create: unexpected error: %v", err)
+	}
+
+	_, err := svc.Create(ctx, userID, "Chinedu", nil, nil)
+	if !errors.Is(err, customer.ErrDuplicateNameRequiresSignal) {
+		t.Fatalf("got %v, want ErrDuplicateNameRequiresSignal", err)
+	}
+}
+
+func TestCreate_DuplicateName_BlankPhoneTreatedAsMissing(t *testing.T) {
+	pool := dbtest.Open(t)
+	userID := dbtest.CreateUser(t, pool, "+2348010000013")
+	svc := customer.NewService(pool)
+	ctx := context.Background()
+
+	if _, err := svc.Create(ctx, userID, "Chinedu", nil, nil); err != nil {
+		t.Fatalf("first create: unexpected error: %v", err)
+	}
+
+	_, err := svc.Create(ctx, userID, "Chinedu", strPtr("   "), nil)
+	if !errors.Is(err, customer.ErrDuplicateNameRequiresSignal) {
+		t.Fatalf("got %v, want ErrDuplicateNameRequiresSignal for a blank phone", err)
+	}
+}
+
+func TestCreate_DuplicateName_WithPhone_Allowed(t *testing.T) {
+	pool := dbtest.Open(t)
+	userID := dbtest.CreateUser(t, pool, "+2348010000014")
+	svc := customer.NewService(pool)
+	ctx := context.Background()
+
+	if _, err := svc.Create(ctx, userID, "Chinedu", nil, nil); err != nil {
+		t.Fatalf("first create: unexpected error: %v", err)
+	}
+
+	c, err := svc.Create(ctx, userID, "Chinedu", strPtr("0803XXX1234"), nil)
+	if err != nil {
+		t.Fatalf("second create with phone: unexpected error: %v", err)
+	}
+	if c.PhoneNumber == nil || *c.PhoneNumber != "0803XXX1234" {
+		t.Fatalf("got phone %v, want 0803XXX1234", c.PhoneNumber)
+	}
+}
+
+func TestCreate_DuplicateName_WithAlias_Allowed(t *testing.T) {
+	pool := dbtest.Open(t)
+	userID := dbtest.CreateUser(t, pool, "+2348010000015")
+	svc := customer.NewService(pool)
+	ctx := context.Background()
+
+	if _, err := svc.Create(ctx, userID, "Chinedu", nil, nil); err != nil {
+		t.Fatalf("first create: unexpected error: %v", err)
+	}
+
+	if _, err := svc.Create(ctx, userID, "Chinedu", nil, strPtr("Chinedu Mechanic")); err != nil {
+		t.Fatalf("second create with alias: unexpected error: %v", err)
+	}
+}
+
+func TestCreate_DuplicateName_ScopedPerUser(t *testing.T) {
+	pool := dbtest.Open(t)
+	userA := dbtest.CreateUser(t, pool, "+2348010000016")
+	userB := dbtest.CreateUser(t, pool, "+2348010000017")
+	svc := customer.NewService(pool)
+	ctx := context.Background()
+
+	if _, err := svc.Create(ctx, userA, "Chinedu", nil, nil); err != nil {
+		t.Fatalf("user A create: unexpected error: %v", err)
+	}
+	if _, err := svc.Create(ctx, userB, "Chinedu", nil, nil); err != nil {
+		t.Fatalf("user B create: unexpected error: %v — the duplicate check must be scoped per user", err)
+	}
+}
+
+// True worst case (decisions.md #8): two pre-existing duplicate
+// customers — no phone, no alias, identical debt description — the
+// only way this state can occur once Create rejects it up front is
+// legacy data, so this is seeded via the repository function directly
+// rather than through Service.Create.
+func TestResolve_ByName_TrueWorstCase_FallsBackToCreationOrder(t *testing.T) {
+	pool := dbtest.Open(t)
+	userID := dbtest.CreateUser(t, pool, "+2348010000018")
+	svc := customer.NewService(pool)
+	ctx := context.Background()
+
+	first, err := customer.Create(ctx, pool, customer.Customer{UserID: userID, Name: "Chinedu"})
+	if err != nil {
+		t.Fatalf("setup first: %v", err)
+	}
+	second, err := customer.Create(ctx, pool, customer.Customer{UserID: userID, Name: "Chinedu"})
+	if err != nil {
+		t.Fatalf("setup second: %v", err)
+	}
+
+	_, err = svc.Resolve(ctx, userID, customer.Ref{Name: strPtr("Chinedu")})
+	var ambiguous *customer.AmbiguousError
+	if !errors.As(err, &ambiguous) {
+		t.Fatalf("got %v, want AmbiguousError", err)
+	}
+	if len(ambiguous.Candidates) != 2 {
+		t.Fatalf("got %d candidates, want 2", len(ambiguous.Candidates))
+	}
+
+	// Same description on both sides, and neither has a phone or
+	// alias — no signal but creation order can tell them apart.
+	hints := ambiguous.Hints(map[int64]string{
+		first.ID:  "3 bags of rice",
+		second.ID: "3 bags of rice",
+	})
+
+	for _, h := range hints {
+		if h.Hint == "" {
+			t.Fatal("got an empty hint in the true worst case, want a creation-order fallback")
+		}
+		if h.Hint == "3 bags of rice" {
+			t.Fatal("identical descriptions must not be used as a tiebreaker (decisions.md #8)")
+		}
+	}
+	if hints[0].Customer.ID == hints[1].Customer.ID {
+		t.Fatal("candidates must remain individually distinguishable even in the worst case")
+	}
+}
+
 func TestGetByID_CrossUserAccessDenied(t *testing.T) {
 	pool := dbtest.Open(t)
 	ownerID := dbtest.CreateUser(t, pool, "+2348010000003")
@@ -157,7 +289,7 @@ func TestResolve_ByAlias_DifferentFromName(t *testing.T) {
 	if err != nil {
 		t.Fatalf("setup: %v", err)
 	}
-	if _, err := svc.Create(ctx, userID, "Chinedu Okafor", nil, nil); err != nil {
+	if _, err := svc.Create(ctx, userID, "Chinedu Okafor", strPtr("0803XXX1234"), nil); err != nil {
 		t.Fatalf("setup: %v", err)
 	}
 
