@@ -36,13 +36,19 @@ type Server struct {
 
 func NewRouter(s *Server) http.Handler {
 	r := chi.NewRouter()
-	r.Use(chimw.RequestID, chimw.Recoverer, middleware.RequestLogger(s.Logger), middleware.TempAuth(s.Pool))
+	r.Use(chimw.RequestID, chimw.Recoverer, middleware.RequestLogger(s.Logger))
 
+	// /healthz must be reachable with no headers at all — that's the
+	// whole point of a health check for orchestration tooling — so it's
+	// registered before TempAuth is added to the chain, not inside the
+	// /api group below.
 	r.Get("/healthz", healthz)
 
 	rateLimited := middleware.RateLimit(s.Redis, s.RateLimitPerMinute, rateLimitWindow)
 
 	r.Route("/api", func(r chi.Router) {
+		r.Use(middleware.TempAuth(s.Pool))
+
 		r.Post("/customers", s.createCustomer)
 		r.Get("/customers", s.listCustomers)
 		r.Get("/customers/{id}", s.getCustomer)
