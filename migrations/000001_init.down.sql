@@ -1,0 +1,10 @@
+DROP TABLE IF EXISTS messages;
+DROP TABLE IF EXISTS reminders;
+DROP TYPE IF EXISTS reminder_status;
+DROP TYPE IF EXISTS reminder_recipient_type;
+DROP TABLE IF EXISTS ledger_entries;
+DROP TABLE IF EXISTS payments;
+DROP TABLE IF EXISTS debts;
+DROP TYPE IF EXISTS debt_status;
+DROP TABLE IF EXISTS customers;
+DROP TABLE IF EXISTS users;
