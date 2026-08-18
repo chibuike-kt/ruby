@@ -43,6 +43,15 @@ services:
       - "8080:8080"
     env_file:
       - .env
+    environment:
+      # .env's DATABASE_URL/REDIS_URL point at localhost for host-based
+      # `go run`/`make run`, where postgres/redis are reached through
+      # their published ports. Inside this container, localhost means
+      # the api container itself — postgres and redis are only
+      # reachable by their compose service name. These override
+      # whatever .env sets, for this service only.
+      DATABASE_URL: postgres://ruby:ruby@postgres:5432/ruby?sslmode=disable
+      REDIS_URL: redis://redis:6379/0
     depends_on:
       postgres:
         condition: service_healthy
