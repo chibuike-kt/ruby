@@ -36,6 +36,27 @@ func textPayload(from, id, body string) []byte {
 	}`, from, from, id, body)
 }
 
+// interactivePayload builds an inbound button_reply/list_reply webhook
+// event (docs/BRIEF-interactive-messages.md's confirmed-current shape).
+// replyType is "button_reply" or "list_reply".
+func interactivePayload(from, id, replyType, replyID, replyTitle string) []byte {
+	return fmt.Appendf(nil, `{
+		"object": "whatsapp_business_account",
+		"entry": [{
+			"id": "entry-1",
+			"changes": [{
+				"field": "messages",
+				"value": {
+					"messaging_product": "whatsapp",
+					"metadata": {"display_phone_number": "15550783881", "phone_number_id": "106540352242922"},
+					"contacts": [{"profile": {"name": "Trader"}, "wa_id": %q}],
+					"messages": [{"from": %q, "id": %q, "timestamp": "1749416383", "type": "interactive", "interactive": {"type": %q, %q: {"id": %q, "title": %q}}}]
+				}
+			}]
+		}]
+	}`, from, from, id, replyType, replyType, replyID, replyTitle)
+}
+
 func audioPayload(from, id, mediaID string) []byte {
 	return fmt.Appendf(nil, `{
 		"object": "whatsapp_business_account",
@@ -330,5 +351,62 @@ func TestReceiveEvent_UnsupportedMessageType_StoredWithoutContentReference(t *te
 	}
 	if len(outcomes) != 1 || !outcomes[0].Stored {
 		t.Fatalf("got outcomes %+v, want a stored (not crashed/rejected) message", outcomes)
+	}
+}
+
+func TestReceiveEvent_InteractiveButtonReply_StoresID(t *testing.T) {
+	pool := dbtest.Open(t)
+	rdb := dbtest.OpenRedis(t)
+	svc := whatsapp.NewService(pool, rdb, "test-secret", "test-verify-token", "test-access-token", "test-phone-number-id", slog.Default())
+	dbtest.CreateUser(t, pool, "+16505551239")
+
+	outcomes, err := svc.ReceiveEvent(context.Background(), interactivePayload("16505551239", "wamid.btn1", "button_reply", "42", "1. Chinedu"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(outcomes) != 1 || !outcomes[0].Stored {
+		t.Fatalf("got outcomes %+v, want a single stored message", outcomes)
+	}
+
+	var contentRef, messageType string
+	err = pool.QueryRow(context.Background(),
+		`SELECT content_reference, message_type FROM messages WHERE provider_message_id = $1`,
+		"wamid.btn1").Scan(&contentRef, &messageType)
+	if err != nil {
+		t.Fatalf("query stored message: %v", err)
+	}
+	// The stored content is the button's id ("42"), not its title — the
+	// id is what carries the answer (docs/BRIEF-interactive-messages.md),
+	// title is only for display.
+	if contentRef != "42" {
+		t.Fatalf("got content_reference %q, want the button_reply id \"42\", not the title", contentRef)
+	}
+	if messageType != "interactive" {
+		t.Fatalf("got message_type %q, want interactive", messageType)
+	}
+}
+
+func TestReceiveEvent_InteractiveListReply_StoresID(t *testing.T) {
+	pool := dbtest.Open(t)
+	rdb := dbtest.OpenRedis(t)
+	svc := whatsapp.NewService(pool, rdb, "test-secret", "test-verify-token", "test-access-token", "test-phone-number-id", slog.Default())
+	dbtest.CreateUser(t, pool, "+16505551240")
+
+	outcomes, err := svc.ReceiveEvent(context.Background(), interactivePayload("16505551240", "wamid.list1", "list_reply", "77", "3. Chinedu"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(outcomes) != 1 || !outcomes[0].Stored {
+		t.Fatalf("got outcomes %+v, want a single stored message", outcomes)
+	}
+
+	var contentRef string
+	err = pool.QueryRow(context.Background(),
+		`SELECT content_reference FROM messages WHERE provider_message_id = $1`, "wamid.list1").Scan(&contentRef)
+	if err != nil {
+		t.Fatalf("query stored message: %v", err)
+	}
+	if contentRef != "77" {
+		t.Fatalf("got content_reference %q, want the list_reply id \"77\"", contentRef)
 	}
 }

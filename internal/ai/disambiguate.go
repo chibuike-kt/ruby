@@ -1,6 +1,7 @@
 package ai
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 )
@@ -150,4 +151,74 @@ func onlyDigits(s string) string {
 		}
 	}
 	return b.String()
+}
+
+// matchCandidateByID finds the candidate an interactive button_reply or
+// list_reply's id refers to. The id is the candidate's own customer_id
+// (docs/BRIEF-interactive-messages.md), so this is a direct lookup, not
+// matchCandidate's text-matching heuristics — "no need to re-run the
+// deterministic text matching... since the id is the answer."
+func matchCandidateByID(id int64, candidates []PendingCandidateOption) (PendingCandidateOption, bool) {
+	for _, c := range candidates {
+		if c.CustomerID == id {
+			return c, true
+		}
+	}
+	return PendingCandidateOption{}, false
+}
+
+// numberedTitle mirrors the numbering matchCandidate's numeric-index
+// path already expects ("1", "2", ...) — every candidate in a real
+// AmbiguousError shares the identical name (that's the whole reason
+// disambiguation is needed), so the number is what actually
+// distinguishes the buttons/list rows from each other.
+func numberedTitle(index int, name string) string {
+	return fmt.Sprintf("%d. %s", index+1, name)
+}
+
+// candidateDisplay builds the numbered "1. Chinedu (2 cartons of
+// noodles)" lines used both in the phrased prompt text and reused
+// verbatim on every re-ask, so a mistyped/unmatched reply sees exactly
+// the same numbering as the original prompt.
+func candidateDisplay(candidates []PendingCandidateOption) []string {
+	items := make([]string, len(candidates))
+	for i, c := range candidates {
+		items[i] = fmt.Sprintf("%d. %s (%s)", i+1, c.Name, c.Hint)
+	}
+	return items
+}
+
+// disambiguationPresentation picks buttons (<=3 candidates) or a list
+// (4-10) — spec: "4+ candidates -> list message instead. This should be
+// rare... but must not break when it happens." More than a list's
+// 10-option cap returns no interactive payload at all (text-only
+// fallback) rather than sending WhatsApp a request it would reject.
+func disambiguationPresentation(candidates []PendingCandidateOption) ([]Button, *ListPayload) {
+	switch {
+	case len(candidates) == 0:
+		return nil, nil
+	case len(candidates) <= 3:
+		buttons := make([]Button, len(candidates))
+		for i, c := range candidates {
+			buttons[i] = Button{ID: strconv.FormatInt(c.CustomerID, 10), Title: numberedTitle(i, c.Name)}
+		}
+		return buttons, nil
+	case len(candidates) <= 10:
+		options := make([]ListOption, len(candidates))
+		for i, c := range candidates {
+			options[i] = ListOption{ID: strconv.FormatInt(c.CustomerID, 10), Title: numberedTitle(i, c.Name), Description: c.Hint}
+		}
+		return nil, &ListPayload{ButtonLabel: "Select", Sections: []ListSection{{Title: "Candidates", Options: options}}}
+	default:
+		return nil, nil
+	}
+}
+
+// disambiguationReplyFor attaches the right interactive presentation to
+// a disambiguation prompt's text — shared by the initial prompt and
+// every re-ask, so a mistyped/unmatched reply still gets the same
+// tappable options back, not a text-only re-ask.
+func disambiguationReplyFor(text string, candidates []PendingCandidateOption) Reply {
+	buttons, list := disambiguationPresentation(candidates)
+	return Reply{Text: text, Buttons: buttons, List: list}
 }
