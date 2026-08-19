@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/chibuike-kt/ruby/internal/ai"
 )
 
 // graphAPIBaseURL is the WhatsApp Cloud (Graph) API's base URL. It's a
@@ -58,7 +60,146 @@ func sendText(ctx context.Context, accessToken, phoneNumberID, to, body string) 
 	if err != nil {
 		return "", err
 	}
+	return postMessage(ctx, accessToken, phoneNumberID, reqBody)
+}
 
+// maxButtonTitleRunes matches docs/BRIEF-interactive-messages.md: 20
+// chars avoids on-screen truncation on small phones, even though the
+// Cloud API's own hard limit is 25. Enforced here, in the transport
+// layer, right before a request leaves the process — the last line of
+// defense regardless of what ai handed this function (e.g. a long
+// customer name as a button title).
+const maxButtonTitleRunes = 20
+
+func truncateTitle(title string) string {
+	r := []rune(title)
+	if len(r) <= maxButtonTitleRunes {
+		return title
+	}
+	if maxButtonTitleRunes <= 1 {
+		return string(r[:maxButtonTitleRunes])
+	}
+	return string(r[:maxButtonTitleRunes-1]) + "…"
+}
+
+type interactiveBodyText struct {
+	Text string `json:"text"`
+}
+
+type interactiveReply struct {
+	ID    string `json:"id"`
+	Title string `json:"title"`
+}
+
+type interactiveButtonRequest struct {
+	MessagingProduct string                `json:"messaging_product"`
+	To               string                `json:"to"`
+	Type             string                `json:"type"`
+	Interactive      interactiveButtonBody `json:"interactive"`
+}
+
+type interactiveButtonBody struct {
+	Type   string                  `json:"type"`
+	Body   interactiveBodyText     `json:"body"`
+	Action interactiveButtonAction `json:"action"`
+}
+
+type interactiveButtonAction struct {
+	Buttons []interactiveButtonItem `json:"buttons"`
+}
+
+type interactiveButtonItem struct {
+	Type  string           `json:"type"`
+	Reply interactiveReply `json:"reply"`
+}
+
+// sendInteractiveButtons posts a reply-buttons interactive message (max
+// 3 buttons — spec) via the Cloud API. Titles are truncated to
+// maxButtonTitleRunes regardless of what the caller supplied.
+func sendInteractiveButtons(ctx context.Context, accessToken, phoneNumberID, to, body string, buttons []ai.Button) (string, error) {
+	items := make([]interactiveButtonItem, len(buttons))
+	for i, b := range buttons {
+		items[i] = interactiveButtonItem{Type: "reply", Reply: interactiveReply{ID: b.ID, Title: truncateTitle(b.Title)}}
+	}
+
+	reqBody, err := json.Marshal(interactiveButtonRequest{
+		MessagingProduct: "whatsapp",
+		To:               strings.TrimPrefix(to, "+"),
+		Type:             "interactive",
+		Interactive: interactiveButtonBody{
+			Type:   "button",
+			Body:   interactiveBodyText{Text: body},
+			Action: interactiveButtonAction{Buttons: items},
+		},
+	})
+	if err != nil {
+		return "", err
+	}
+	return postMessage(ctx, accessToken, phoneNumberID, reqBody)
+}
+
+type interactiveListRequest struct {
+	MessagingProduct string              `json:"messaging_product"`
+	To               string              `json:"to"`
+	Type             string              `json:"type"`
+	Interactive      interactiveListBody `json:"interactive"`
+}
+
+type interactiveListBody struct {
+	Type   string                `json:"type"`
+	Body   interactiveBodyText   `json:"body"`
+	Action interactiveListAction `json:"action"`
+}
+
+type interactiveListAction struct {
+	Button   string                   `json:"button"`
+	Sections []interactiveListSection `json:"sections"`
+}
+
+type interactiveListSection struct {
+	Title string               `json:"title"`
+	Rows  []interactiveListRow `json:"rows"`
+}
+
+type interactiveListRow struct {
+	ID          string `json:"id"`
+	Title       string `json:"title"`
+	Description string `json:"description,omitempty"`
+}
+
+// sendInteractiveList posts a list message (4-10 options, more than a
+// button row can hold) via the Cloud API. Row titles are truncated the
+// same way button titles are.
+func sendInteractiveList(ctx context.Context, accessToken, phoneNumberID, to, body, buttonLabel string, sections []ai.ListSection) (string, error) {
+	reqSections := make([]interactiveListSection, len(sections))
+	for i, s := range sections {
+		rows := make([]interactiveListRow, len(s.Options))
+		for j, o := range s.Options {
+			rows[j] = interactiveListRow{ID: o.ID, Title: truncateTitle(o.Title), Description: o.Description}
+		}
+		reqSections[i] = interactiveListSection{Title: s.Title, Rows: rows}
+	}
+
+	reqBody, err := json.Marshal(interactiveListRequest{
+		MessagingProduct: "whatsapp",
+		To:               strings.TrimPrefix(to, "+"),
+		Type:             "interactive",
+		Interactive: interactiveListBody{
+			Type:   "list",
+			Body:   interactiveBodyText{Text: body},
+			Action: interactiveListAction{Button: buttonLabel, Sections: reqSections},
+		},
+	})
+	if err != nil {
+		return "", err
+	}
+	return postMessage(ctx, accessToken, phoneNumberID, reqBody)
+}
+
+// postMessage is the shared HTTP mechanics for every POST
+// /{phone_number_id}/messages call (text, buttons, list) — only the
+// marshaled body differs between them.
+func postMessage(ctx context.Context, accessToken, phoneNumberID string, reqBody []byte) (string, error) {
 	url := fmt.Sprintf("%s/%s/messages", graphAPIBaseURL, phoneNumberID)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(reqBody))
 	if err != nil {

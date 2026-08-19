@@ -28,7 +28,7 @@ func TestPhrase_RequestShape(t *testing.T) {
 		Event:        ai.EventDebtCreated,
 		Language:     ai.LangEnglish,
 		CustomerName: "Chinedu",
-		AmountMinor:  7500000,
+		AmountMinor:  new(int64(7500000)),
 	})
 	if err != nil {
 		t.Fatalf("Phrase: %v", err)
@@ -48,7 +48,7 @@ func TestPhrase_RequestShape(t *testing.T) {
 	if err := json.Unmarshal([]byte(gotReq.Input[1].Content), &sentInput); err != nil {
 		t.Fatalf("the user message wasn't the marshaled PhraseInput: %v", err)
 	}
-	if sentInput.CustomerName != "Chinedu" || sentInput.AmountMinor != 7500000 {
+	if sentInput.CustomerName != "Chinedu" || sentInput.AmountMinor == nil || *sentInput.AmountMinor != 7500000 {
 		t.Fatalf("got %+v, want the PhraseInput round-tripped as the user message", sentInput)
 	}
 

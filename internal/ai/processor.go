@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -28,15 +29,34 @@ func isSupportedLanguage(l Language) bool {
 var errUnsupportedMessageType = errors.New("ai: unsupported message type")
 var errNoOutstandingDebt = errors.New("ai: customer has no outstanding debt")
 
+// Confirmation button ids (spec §23, docs/BRIEF-interactive-messages.md).
+// Fixed, English-only, deliberately not run through any translation
+// table — see the brief's "What NOT to build": short generic labels
+// like these already read fine across all five supported languages.
+const (
+	buttonConfirm = "confirm"
+	buttonEdit    = "edit"
+	buttonCancel  = "cancel"
+)
+
+func confirmationButtons() []Button {
+	return []Button{
+		{ID: buttonConfirm, Title: "Confirm"},
+		{ID: buttonEdit, Title: "Edit"},
+		{ID: buttonCancel, Title: "Cancel"},
+	}
+}
+
 // InboundMessage is what Processor.Handle needs from a stored WhatsApp
 // message — plain values, not a whatsapp.StoredMessage, so this package
 // never imports internal/whatsapp (plan decision #10).
 type InboundMessage struct {
 	UserID            int64
 	ProviderMessageID string
-	Type              string // "text" or "audio"
+	Type              string // "text", "audio", or "interactive"
 	Text              *string
 	MediaID           *string
+	InteractiveID     *string // set when Type == "interactive": the button_reply/list_reply id
 }
 
 // ToInboundMessage adapts whatsapp-shaped fields into an InboundMessage.
@@ -47,6 +67,8 @@ func ToInboundMessage(userID int64, providerMessageID, messageType string, conte
 		msg.Text = contentReference
 	case "audio":
 		msg.MediaID = contentReference
+	case "interactive":
+		msg.InteractiveID = contentReference
 	}
 	return msg
 }
@@ -88,20 +110,20 @@ func NewProcessor(cfg Config) *Processor {
 // Any error is turned into a fixed, friendly message before sending
 // (spec §37) — the returned error is still surfaced to the caller for
 // logging, but it's never what reaches the trader verbatim.
-func (p *Processor) Handle(ctx context.Context, msg InboundMessage) (string, error) {
+func (p *Processor) Handle(ctx context.Context, msg InboundMessage) (Reply, error) {
 	acct, err := account.GetByID(ctx, p.cfg.Pool, msg.UserID)
 	if err != nil {
-		return "", err
+		return Reply{}, err
 	}
 
 	reply, lang, procErr := p.process(ctx, msg)
 	if procErr != nil {
 		p.logf("ai processing failed", "error", procErr)
-		reply = fixedText(genericErrorText, lang)
+		reply = textReply(fixedText(genericErrorText, lang))
 	}
 
-	if p.cfg.Sender != nil && reply != "" {
-		if sendErr := p.cfg.Sender.SendText(ctx, acct.PhoneNumber, reply); sendErr != nil {
+	if p.cfg.Sender != nil && reply.Text != "" {
+		if sendErr := p.send(ctx, acct.PhoneNumber, reply); sendErr != nil {
 			p.logf("ai reply send failed", "error", sendErr)
 		}
 	}
@@ -109,21 +131,64 @@ func (p *Processor) Handle(ctx context.Context, msg InboundMessage) (string, err
 	return reply, procErr
 }
 
-func (p *Processor) process(ctx context.Context, msg InboundMessage) (string, Language, error) {
+// send picks SendList/SendButtons/SendText based on what reply actually
+// carries — buttons/list are an enhancement, so a Reply with neither
+// still sends correctly as plain text.
+func (p *Processor) send(ctx context.Context, to string, reply Reply) error {
+	switch {
+	case reply.List != nil:
+		return p.cfg.Sender.SendList(ctx, to, reply.Text, reply.List.ButtonLabel, reply.List.Sections)
+	case len(reply.Buttons) > 0:
+		return p.cfg.Sender.SendButtons(ctx, to, reply.Text, reply.Buttons)
+	default:
+		return p.cfg.Sender.SendText(ctx, to, reply.Text)
+	}
+}
+
+func (p *Processor) process(ctx context.Context, msg InboundMessage) (Reply, Language, error) {
 	pending, hasPending, err := GetPendingAction(ctx, p.cfg.Redis, msg.UserID)
 	if err != nil {
-		return "", LangEnglish, err
+		return Reply{}, LangEnglish, err
 	}
+
+	// Interactive replies carry a deterministic id, never free text —
+	// dispatched directly, never through greeting detection or the AI
+	// extractor (docs/BRIEF-interactive-messages.md).
+	if msg.Type == "interactive" {
+		return p.handleInteractive(ctx, msg, pending, hasPending)
+	}
+
 	if hasPending && pending.Kind == PendingDisambiguateCustomer {
 		return p.handleDisambiguationReply(ctx, msg, pending)
 	}
 
-	raw, err := p.extract(ctx, msg)
+	text, detectedLang, err := p.resolveText(ctx, msg)
 	if err != nil {
 		if errors.Is(err, errUnsupportedMessageType) {
-			return fixedText(unsupportedMessageTypeText, LangEnglish), LangEnglish, nil
+			return textReply(fixedText(unsupportedMessageTypeText, LangEnglish)), LangEnglish, nil
 		}
-		return "", LangEnglish, err
+		return Reply{}, LangEnglish, err
+	}
+	if strings.TrimSpace(text) == "" {
+		return Reply{}, LangEnglish, errors.New("ai: empty message")
+	}
+
+	// A bare greeting must never reach the financial-intent extractor
+	// (docs/BRIEF-interactive-messages.md) — checked before any AI call
+	// at all, not as a possible classification outcome of one.
+	if lang, ok := greetingLanguage(text); ok {
+		return greetingReply(lang), lang, nil
+	}
+
+	raw, err := p.cfg.Extractor.Extract(ctx, text)
+	if err != nil {
+		return Reply{}, LangEnglish, err
+	}
+	// The transcription response's own detected language is preferred
+	// over re-detecting from the transcript text, per current
+	// gpt-transcribe docs (docs/BRIEF-ai-intent.md).
+	if isSupportedLanguage(detectedLang) {
+		raw.Language = detectedLang
 	}
 	lang := raw.Language
 
@@ -146,52 +211,127 @@ func (p *Processor) process(ctx context.Context, msg InboundMessage) (string, La
 
 	switch raw.Intent {
 	case IntentCreateReminder, IntentCancelReminder:
-		return fixedText(reminderUnsupportedText, lang), lang, nil
+		return textReply(fixedText(reminderUnsupportedText, lang)), lang, nil
 	case IntentConfirmAction:
-		return fixedText(nothingToConfirmText, lang), lang, nil
+		return textReply(fixedText(nothingToConfirmText, lang)), lang, nil
 	case IntentHelp:
-		return fixedText(helpText, lang), lang, nil
+		return textReply(fixedText(helpText, lang)), lang, nil
 	}
 
 	reply, err := p.validateAndExecute(ctx, msg, raw)
 	return reply, lang, err
 }
 
-func (p *Processor) extract(ctx context.Context, msg InboundMessage) (RawIntent, error) {
-	switch msg.Type {
-	case "text":
-		if msg.Text == nil || strings.TrimSpace(*msg.Text) == "" {
-			return RawIntent{}, errors.New("ai: empty text message")
+// handleInteractive deterministically dispatches an inbound
+// button_reply/list_reply. Never runs the AI extractor: the id is
+// always one Ruby itself generated (a customer_id, "confirm"/"edit"/
+// "cancel", or a "menu:..." id), so there's nothing to interpret.
+func (p *Processor) handleInteractive(ctx context.Context, msg InboundMessage, pending PendingAction, hasPending bool) (Reply, Language, error) {
+	id := ""
+	if msg.InteractiveID != nil {
+		id = strings.TrimSpace(*msg.InteractiveID)
+	}
+
+	if hasPending {
+		switch pending.Kind {
+		case PendingDisambiguateCustomer:
+			return p.handleDisambiguationButtonReply(ctx, msg, pending, id)
+		case PendingConfirm:
+			return p.handleConfirmationButtonReply(ctx, msg, pending, id)
 		}
-		return p.cfg.Extractor.Extract(ctx, *msg.Text)
-	case "audio":
-		return p.extractFromAudio(ctx, msg)
-	default:
-		return RawIntent{}, errUnsupportedMessageType
+	}
+
+	switch id {
+	case menuCreateDebt:
+		return textReply(createDebtPromptText), LangEnglish, nil
+	case menuBalance:
+		reply, err := p.executeListOutstandingDebts(ctx, msg, RawIntent{Language: LangEnglish})
+		return reply, LangEnglish, err
+	default: // menuHelp and anything unrecognized
+		return textReply(fixedText(helpText, LangEnglish)), LangEnglish, nil
 	}
 }
 
-func (p *Processor) extractFromAudio(ctx context.Context, msg InboundMessage) (RawIntent, error) {
-	text, detectedLang, err := p.transcribeAudio(ctx, msg)
+func (p *Processor) handleDisambiguationButtonReply(ctx context.Context, msg InboundMessage, pending PendingAction, id string) (Reply, Language, error) {
+	lang := pending.Intent.Language
+
+	customerID, err := strconv.ParseInt(id, 10, 64)
 	if err != nil {
-		return RawIntent{}, err
+		return p.reaskDisambiguation(ctx, pending, lang)
 	}
-	raw, err := p.cfg.Extractor.Extract(ctx, text)
-	if err != nil {
-		return RawIntent{}, err
+	match, ok := matchCandidateByID(customerID, pending.Candidates)
+	if !ok {
+		return p.reaskDisambiguation(ctx, pending, lang)
 	}
-	// The transcription response's own detected language is preferred
-	// over re-detecting from the transcript text, per current
-	// gpt-transcribe docs (docs/BRIEF-ai-intent.md).
-	if isSupportedLanguage(detectedLang) {
-		raw.Language = detectedLang
+
+	if err := ClearPendingAction(ctx, p.cfg.Redis, msg.UserID); err != nil {
+		p.logf("failed to clear pending action", "error", err)
 	}
-	return raw, nil
+
+	resolvedID := match.CustomerID
+	reply, err := p.validateAndExecuteWithHint(ctx, msg, pending.Intent, ContextHint{ResolvedCustomerID: &resolvedID})
+	return reply, lang, err
+}
+
+func (p *Processor) reaskDisambiguation(ctx context.Context, pending PendingAction, lang Language) (Reply, Language, error) {
+	text, err := p.phrase(ctx, PhraseInput{Event: EventAmbiguousCustomer, Language: lang, Items: candidateDisplay(pending.Candidates)})
+	return disambiguationReplyFor(text, pending.Candidates), lang, err
+}
+
+func (p *Processor) handleConfirmationButtonReply(ctx context.Context, msg InboundMessage, pending PendingAction, id string) (Reply, Language, error) {
+	lang := pending.Intent.Language
+
+	switch id {
+	case buttonConfirm:
+		if err := ClearPendingAction(ctx, p.cfg.Redis, msg.UserID); err != nil {
+			p.logf("failed to clear pending action", "error", err)
+		}
+		reply, err := p.executeConfirmed(ctx, msg, pending.Intent)
+		return reply, lang, err
+	case buttonEdit:
+		// "Edit can just prompt the trader to resend the message
+		// correctly rather than building inline editing" — real scope,
+		// explicitly skipped (docs/BRIEF-interactive-messages.md).
+		if err := ClearPendingAction(ctx, p.cfg.Redis, msg.UserID); err != nil {
+			p.logf("failed to clear pending action", "error", err)
+		}
+		return textReply(fixedText(editPromptText, lang)), lang, nil
+	case buttonCancel:
+		if err := ClearPendingAction(ctx, p.cfg.Redis, msg.UserID); err != nil {
+			p.logf("failed to clear pending action", "error", err)
+		}
+		return textReply(fixedText(cancelledText, lang)), lang, nil
+	default:
+		// Unrecognized id while a confirmation is pending — re-ask
+		// rather than silently dropping it.
+		reply, err := p.beginConfirmation(ctx, msg, pending.Intent)
+		return reply, lang, err
+	}
+}
+
+// resolveText returns the plain text behind a text or audio message —
+// for audio, this runs the full download -> transcode -> transcribe
+// pipeline (spec §22). It does not judge whether the text is
+// meaningful; callers decide that — process rejects empty text before
+// ever calling the extractor, while a disambiguation reply (rawText)
+// tolerates it, since an empty/unmatched reply just means "ask again."
+func (p *Processor) resolveText(ctx context.Context, msg InboundMessage) (string, Language, error) {
+	switch msg.Type {
+	case "text":
+		if msg.Text == nil {
+			return "", "", nil
+		}
+		return *msg.Text, "", nil
+	case "audio":
+		return p.transcribeAudio(ctx, msg)
+	default:
+		return "", "", errUnsupportedMessageType
+	}
 }
 
 // transcribeAudio runs the full download -> transcode -> transcribe
-// pipeline (spec §22) and is also reused by handleDisambiguationReply,
-// which needs raw text but not a fresh intent extraction.
+// pipeline (spec §22) and is also reused by rawText, which needs raw
+// text but not a fresh intent extraction.
 func (p *Processor) transcribeAudio(ctx context.Context, msg InboundMessage) (string, Language, error) {
 	if msg.MediaID == nil {
 		return "", "", errors.New("ai: audio message missing media id")
@@ -208,39 +348,27 @@ func (p *Processor) transcribeAudio(ctx context.Context, msg InboundMessage) (st
 }
 
 func (p *Processor) rawText(ctx context.Context, msg InboundMessage) (string, error) {
-	switch msg.Type {
-	case "text":
-		if msg.Text == nil {
-			return "", nil
-		}
-		return *msg.Text, nil
-	case "audio":
-		text, _, err := p.transcribeAudio(ctx, msg)
-		return text, err
-	default:
-		return "", errUnsupportedMessageType
-	}
+	text, _, err := p.resolveText(ctx, msg)
+	return text, err
 }
 
-// handleDisambiguationReply matches the trader's reply locally
+// handleDisambiguationReply matches the trader's typed reply locally
 // (disambiguate.go) — no AI call, since this is a deterministic
 // selection step, not a language-understanding one (plan decision #3).
-func (p *Processor) handleDisambiguationReply(ctx context.Context, msg InboundMessage, pending PendingAction) (string, Language, error) {
+// Kept working exactly as before buttons existed
+// (docs/BRIEF-interactive-messages.md: "Keep the existing text-reply
+// matching path working too").
+func (p *Processor) handleDisambiguationReply(ctx context.Context, msg InboundMessage, pending PendingAction) (Reply, Language, error) {
 	lang := pending.Intent.Language
 
 	text, err := p.rawText(ctx, msg)
 	if err != nil {
-		return "", lang, err
+		return Reply{}, lang, err
 	}
 
 	match, ok := matchCandidate(text, pending.Candidates)
 	if !ok {
-		reply, err := p.phrase(ctx, PhraseInput{
-			Event:    EventAmbiguousCustomer,
-			Language: lang,
-			Items:    candidateDisplay(pending.Candidates),
-		})
-		return reply, lang, err
+		return p.reaskDisambiguation(ctx, pending, lang)
 	}
 
 	if err := ClearPendingAction(ctx, p.cfg.Redis, msg.UserID); err != nil {
@@ -252,15 +380,15 @@ func (p *Processor) handleDisambiguationReply(ctx context.Context, msg InboundMe
 	return reply, lang, err
 }
 
-func (p *Processor) validateAndExecute(ctx context.Context, msg InboundMessage, raw RawIntent) (string, error) {
+func (p *Processor) validateAndExecute(ctx context.Context, msg InboundMessage, raw RawIntent) (Reply, error) {
 	hint, err := p.contextHint(ctx, msg.UserID)
 	if err != nil {
-		return "", err
+		return Reply{}, err
 	}
 	return p.validateAndExecuteWithHint(ctx, msg, raw, hint)
 }
 
-func (p *Processor) validateAndExecuteWithHint(ctx context.Context, msg InboundMessage, raw RawIntent, hint ContextHint) (string, error) {
+func (p *Processor) validateAndExecuteWithHint(ctx context.Context, msg InboundMessage, raw RawIntent, hint ContextHint) (Reply, error) {
 	action, err := p.validator.Validate(ctx, msg.UserID, raw, hint)
 	if err != nil {
 		return p.handleValidationError(ctx, msg, raw, err)
@@ -271,7 +399,7 @@ func (p *Processor) validateAndExecuteWithHint(ctx context.Context, msg InboundM
 // executeConfirmed re-runs validation+execution for a pending intent a
 // trader just confirmed, bypassing the confidence gate — a human just
 // confirmed it, regardless of what the model's own confidence was.
-func (p *Processor) executeConfirmed(ctx context.Context, msg InboundMessage, raw RawIntent) (string, error) {
+func (p *Processor) executeConfirmed(ctx context.Context, msg InboundMessage, raw RawIntent) (Reply, error) {
 	confirmed := raw
 	confirmed.Confidence = ConfidenceHigh
 	return p.validateAndExecute(ctx, msg, confirmed)
@@ -288,41 +416,42 @@ func (p *Processor) contextHint(ctx context.Context, userID int64) (ContextHint,
 	return ContextHint{LastCustomerID: &id}, nil
 }
 
-func (p *Processor) handleValidationError(ctx context.Context, msg InboundMessage, raw RawIntent, err error) (string, error) {
+func (p *Processor) handleValidationError(ctx context.Context, msg InboundMessage, raw RawIntent, err error) (Reply, error) {
 	if ambiguous, ok := errors.AsType[*customer.AmbiguousError](err); ok {
 		return p.beginDisambiguation(ctx, msg, raw, ambiguous)
 	}
 
 	if notFound, ok := errors.AsType[*CustomerNotFoundError](err); ok {
-		return p.phrase(ctx, PhraseInput{Event: EventCustomerNotFound, Language: raw.Language, CustomerName: notFound.Name})
+		text, err := p.phrase(ctx, PhraseInput{Event: EventCustomerNotFound, Language: raw.Language, CustomerName: notFound.Name})
+		return textReply(text), err
 	}
 
 	switch {
 	case errors.Is(err, ErrAmountRequired):
-		return p.phrase(ctx, PhraseInput{Event: EventAmountRequired, Language: raw.Language, CustomerName: trimOrEmpty(raw.CustomerName)})
+		text, err := p.phrase(ctx, PhraseInput{Event: EventAmountRequired, Language: raw.Language, CustomerName: trimOrEmpty(raw.CustomerName)})
+		return textReply(text), err
 	case errors.Is(err, ErrCustomerRequired):
-		return p.phrase(ctx, PhraseInput{Event: EventCustomerRequired, Language: raw.Language})
+		text, err := p.phrase(ctx, PhraseInput{Event: EventCustomerRequired, Language: raw.Language})
+		return textReply(text), err
 	default:
-		return "", err
+		return Reply{}, err
 	}
 }
 
-func (p *Processor) beginDisambiguation(ctx context.Context, msg InboundMessage, raw RawIntent, ambiguous *customer.AmbiguousError) (string, error) {
+func (p *Processor) beginDisambiguation(ctx context.Context, msg InboundMessage, raw RawIntent, ambiguous *customer.AmbiguousError) (Reply, error) {
 	descriptions, err := p.outstandingDescriptions(ctx, msg.UserID)
 	if err != nil {
-		return "", err
+		return Reply{}, err
 	}
 	hints := ambiguous.Hints(descriptions)
 
 	candidates := make([]PendingCandidateOption, len(hints))
-	items := make([]string, len(hints))
 	for i, h := range hints {
 		phone := ""
 		if h.Customer.PhoneNumber != nil {
 			phone = *h.Customer.PhoneNumber
 		}
-		candidates[i] = PendingCandidateOption{CustomerID: h.Customer.ID, Phone: phone, Hint: h.Hint}
-		items[i] = fmt.Sprintf("%s (%s)", h.Customer.Name, h.Hint)
+		candidates[i] = PendingCandidateOption{CustomerID: h.Customer.ID, Name: h.Customer.Name, Phone: phone, Hint: h.Hint}
 	}
 
 	if err := SetPendingAction(ctx, p.cfg.Redis, msg.UserID, PendingAction{
@@ -330,10 +459,14 @@ func (p *Processor) beginDisambiguation(ctx context.Context, msg InboundMessage,
 		Intent:     raw,
 		Candidates: candidates,
 	}, DefaultPendingTTL); err != nil {
-		return "", err
+		return Reply{}, err
 	}
 
-	return p.phrase(ctx, PhraseInput{Event: EventAmbiguousCustomer, Language: raw.Language, Items: items})
+	text, err := p.phrase(ctx, PhraseInput{Event: EventAmbiguousCustomer, Language: raw.Language, Items: candidateDisplay(candidates)})
+	if err != nil {
+		return Reply{}, err
+	}
+	return disambiguationReplyFor(text, candidates), nil
 }
 
 // outstandingDescriptions maps customer_id -> one representative
@@ -356,15 +489,7 @@ func (p *Processor) outstandingDescriptions(ctx context.Context, userID int64) (
 	return byCustomer, nil
 }
 
-func candidateDisplay(candidates []PendingCandidateOption) []string {
-	items := make([]string, len(candidates))
-	for i, c := range candidates {
-		items[i] = c.Hint
-	}
-	return items
-}
-
-func (p *Processor) execute(ctx context.Context, msg InboundMessage, raw RawIntent, action Action) (string, error) {
+func (p *Processor) execute(ctx context.Context, msg InboundMessage, raw RawIntent, action Action) (Reply, error) {
 	switch a := action.(type) {
 	case CreateDebtAction:
 		return p.executeCreateDebt(ctx, msg, raw, a)
@@ -381,27 +506,27 @@ func (p *Processor) execute(ctx context.Context, msg InboundMessage, raw RawInte
 	case GetPaymentSummaryAction:
 		return p.executeGetPaymentSummary(ctx, msg, raw)
 	case HelpAction:
-		return fixedText(helpText, raw.Language), nil
+		return textReply(fixedText(helpText, raw.Language)), nil
 	case UnsupportedAction:
-		return fixedText(reminderUnsupportedText, raw.Language), nil
+		return textReply(fixedText(reminderUnsupportedText, raw.Language)), nil
 	default:
-		return "", fmt.Errorf("ai: unknown action type %T", action)
+		return Reply{}, fmt.Errorf("ai: unknown action type %T", action)
 	}
 }
 
-func (p *Processor) executeCreateDebt(ctx context.Context, msg InboundMessage, raw RawIntent, a CreateDebtAction) (string, error) {
+func (p *Processor) executeCreateDebt(ctx context.Context, msg InboundMessage, raw RawIntent, a CreateDebtAction) (Reply, error) {
 	if raw.Confidence == ConfidenceLow {
 		return p.beginConfirmation(ctx, msg, raw)
 	}
 
 	customerID, customerName, err := p.resolveOrCreateCustomer(ctx, msg.UserID, a.Customer)
 	if err != nil {
-		return "", err
+		return Reply{}, err
 	}
 
 	d, err := p.cfg.Debts.Create(ctx, msg.UserID, customerID, a.Amount, a.Description, a.DueDate)
 	if err != nil {
-		return "", err
+		return Reply{}, err
 	}
 	p.rememberLastCustomer(ctx, msg.UserID, customerID)
 
@@ -414,7 +539,7 @@ func (p *Processor) executeCreateDebt(ctx context.Context, msg InboundMessage, r
 	// unset (a bug previously did, which the model then read as a
 	// genuine ₦0 outstanding balance; see isGrounded/allowedNumbers).
 	amountMinor := d.Amount.MinorUnits()
-	return p.phrase(ctx, PhraseInput{
+	text, err := p.phrase(ctx, PhraseInput{
 		Event:            EventDebtCreated,
 		Language:         raw.Language,
 		CustomerName:     customerName,
@@ -423,6 +548,7 @@ func (p *Processor) executeCreateDebt(ctx context.Context, msg InboundMessage, r
 		DueDateISO:       dueDateISO,
 		Description:      d.Description,
 	})
+	return textReply(text), err
 }
 
 func (p *Processor) resolveOrCreateCustomer(ctx context.Context, userID int64, ref CustomerRef) (int64, string, error) {
@@ -443,14 +569,14 @@ func (p *Processor) resolveOrCreateCustomer(ctx context.Context, userID int64, r
 	return 0, "", errors.New("ai: customer reference has neither an existing id nor a new name")
 }
 
-func (p *Processor) executeRecordPayment(ctx context.Context, msg InboundMessage, raw RawIntent, a RecordPaymentAction) (string, error) {
+func (p *Processor) executeRecordPayment(ctx context.Context, msg InboundMessage, raw RawIntent, a RecordPaymentAction) (Reply, error) {
 	if raw.Confidence == ConfidenceLow {
 		return p.beginConfirmation(ctx, msg, raw)
 	}
 
 	c, err := customer.GetByID(ctx, p.cfg.Pool, msg.UserID, a.CustomerID)
 	if err != nil {
-		return "", err
+		return Reply{}, err
 	}
 
 	// Multiple outstanding debts for one customer: apply to the oldest
@@ -459,9 +585,10 @@ func (p *Processor) executeRecordPayment(ctx context.Context, msg InboundMessage
 	target, err := p.oldestOutstandingDebt(ctx, msg.UserID, a.CustomerID)
 	if err != nil {
 		if errors.Is(err, errNoOutstandingDebt) {
-			return p.phrase(ctx, PhraseInput{Event: EventNoOutstandingDebt, Language: raw.Language, CustomerName: c.Name})
+			text, err := p.phrase(ctx, PhraseInput{Event: EventNoOutstandingDebt, Language: raw.Language, CustomerName: c.Name})
+			return textReply(text), err
 		}
-		return "", err
+		return Reply{}, err
 	}
 
 	// whatsapp-level dedup (decisions.md #2) already guarantees this
@@ -474,46 +601,51 @@ func (p *Processor) executeRecordPayment(ctx context.Context, msg InboundMessage
 		if overpay, ok := errors.AsType[*payment.OverpaymentError](err); ok {
 			return p.beginOverpaymentConfirmation(ctx, msg, raw, overpay)
 		}
-		return "", err
+		return Reply{}, err
 	}
 	p.rememberLastCustomer(ctx, msg.UserID, a.CustomerID)
 
 	paidMinor, err := payment.SumByDebt(ctx, p.cfg.Pool, target.ID)
 	if err != nil {
-		return "", err
+		return Reply{}, err
 	}
 
 	outstandingMinor := target.Amount.MinorUnits() - paidMinor
-	return p.phrase(ctx, PhraseInput{
+	text, err := p.phrase(ctx, PhraseInput{
 		Event:            EventPaymentRecorded,
 		Language:         raw.Language,
 		CustomerName:     c.Name,
 		AmountMinor:      &result.Payment.AmountMinor,
 		OutstandingMinor: &outstandingMinor,
 	})
+	return textReply(text), err
 }
 
 // beginOverpaymentConfirmation implements decisions.md #6: the default
 // answer is "record the actual outstanding amount," never what the
 // trader said, and only ever on an explicit confirmation.
-func (p *Processor) beginOverpaymentConfirmation(ctx context.Context, msg InboundMessage, raw RawIntent, overpay *payment.OverpaymentError) (string, error) {
+func (p *Processor) beginOverpaymentConfirmation(ctx context.Context, msg InboundMessage, raw RawIntent, overpay *payment.OverpaymentError) (Reply, error) {
 	adjusted := raw
 	outstanding := overpay.Outstanding.MinorUnits()
 	adjusted.AmountMinor = &outstanding
 	adjusted.Confidence = ConfidenceHigh
 
 	if err := SetPendingAction(ctx, p.cfg.Redis, msg.UserID, PendingAction{Kind: PendingConfirm, Intent: adjusted}, DefaultPendingTTL); err != nil {
-		return "", err
+		return Reply{}, err
 	}
 
 	attempted := overpay.Attempted.MinorUnits()
-	return p.phrase(ctx, PhraseInput{
+	text, err := p.phrase(ctx, PhraseInput{
 		Event:            EventOverpaymentPrompt,
 		Language:         raw.Language,
 		CustomerName:     trimOrEmpty(raw.CustomerName),
 		OutstandingMinor: &outstanding,
 		AttemptedMinor:   &attempted,
 	})
+	if err != nil {
+		return Reply{}, err
+	}
+	return Reply{Text: text, Buttons: confirmationButtons()}, nil
 }
 
 func (p *Processor) oldestOutstandingDebt(ctx context.Context, userID, customerID int64) (debt.Debt, error) {
@@ -538,14 +670,14 @@ func (p *Processor) oldestOutstandingDebt(ctx context.Context, userID, customerI
 	return oldest, nil
 }
 
-func (p *Processor) beginConfirmation(ctx context.Context, msg InboundMessage, raw RawIntent) (string, error) {
+func (p *Processor) beginConfirmation(ctx context.Context, msg InboundMessage, raw RawIntent) (Reply, error) {
 	if err := SetPendingAction(ctx, p.cfg.Redis, msg.UserID, PendingAction{Kind: PendingConfirm, Intent: raw}, DefaultPendingTTL); err != nil {
-		return "", err
+		return Reply{}, err
 	}
 	// raw.AmountMinor is already *int64 — passed through as-is rather
 	// than defaulted to 0 when nil, so a genuinely-missing amount never
 	// masquerades as a real ₦0 in front of the phrasing model.
-	return p.phrase(ctx, PhraseInput{
+	text, err := p.phrase(ctx, PhraseInput{
 		Event:        EventConfirmationNeeded,
 		Language:     raw.Language,
 		CustomerName: trimOrEmpty(raw.CustomerName),
@@ -553,16 +685,20 @@ func (p *Processor) beginConfirmation(ctx context.Context, msg InboundMessage, r
 		DueDateISO:   trimOrEmpty(raw.DueDateISO),
 		Description:  trimOrEmpty(raw.Description),
 	})
+	if err != nil {
+		return Reply{}, err
+	}
+	return Reply{Text: text, Buttons: confirmationButtons()}, nil
 }
 
-func (p *Processor) executeGetCustomerBalance(ctx context.Context, msg InboundMessage, raw RawIntent, a GetCustomerBalanceAction) (string, error) {
+func (p *Processor) executeGetCustomerBalance(ctx context.Context, msg InboundMessage, raw RawIntent, a GetCustomerBalanceAction) (Reply, error) {
 	c, err := customer.GetByID(ctx, p.cfg.Pool, msg.UserID, a.CustomerID)
 	if err != nil {
-		return "", err
+		return Reply{}, err
 	}
 	debts, err := p.cfg.Debts.ListOutstanding(ctx, msg.UserID)
 	if err != nil {
-		return "", err
+		return Reply{}, err
 	}
 	var outstanding int64
 	for _, d := range debts {
@@ -571,69 +707,74 @@ func (p *Processor) executeGetCustomerBalance(ctx context.Context, msg InboundMe
 		}
 		paid, err := payment.SumByDebt(ctx, p.cfg.Pool, d.ID)
 		if err != nil {
-			return "", err
+			return Reply{}, err
 		}
 		outstanding += d.Amount.MinorUnits() - paid
 	}
-	return p.phrase(ctx, PhraseInput{Event: EventCustomerBalance, Language: raw.Language, CustomerName: c.Name, OutstandingMinor: &outstanding})
+	text, err := p.phrase(ctx, PhraseInput{Event: EventCustomerBalance, Language: raw.Language, CustomerName: c.Name, OutstandingMinor: &outstanding})
+	return textReply(text), err
 }
 
-func (p *Processor) executeListCustomers(ctx context.Context, msg InboundMessage, raw RawIntent) (string, error) {
+func (p *Processor) executeListCustomers(ctx context.Context, msg InboundMessage, raw RawIntent) (Reply, error) {
 	customers, err := customer.ListByUser(ctx, p.cfg.Pool, msg.UserID)
 	if err != nil {
-		return "", err
+		return Reply{}, err
 	}
 	items := make([]string, len(customers))
 	for i, c := range customers {
 		items[i] = c.Name
 	}
-	return p.phrase(ctx, PhraseInput{Event: EventCustomerList, Language: raw.Language, Items: items})
+	text, err := p.phrase(ctx, PhraseInput{Event: EventCustomerList, Language: raw.Language, Items: items})
+	return textReply(text), err
 }
 
-func (p *Processor) executeListOutstandingDebts(ctx context.Context, msg InboundMessage, raw RawIntent) (string, error) {
+func (p *Processor) executeListOutstandingDebts(ctx context.Context, msg InboundMessage, raw RawIntent) (Reply, error) {
 	debts, err := p.cfg.Debts.ListOutstanding(ctx, msg.UserID)
 	if err != nil {
-		return "", err
+		return Reply{}, err
 	}
 	items := make([]string, len(debts))
 	for i, d := range debts {
 		c, err := customer.GetByID(ctx, p.cfg.Pool, msg.UserID, d.CustomerID)
 		if err != nil {
-			return "", err
+			return Reply{}, err
 		}
 		items[i] = fmt.Sprintf("%s: %d", c.Name, d.Amount.MinorUnits())
 	}
-	return p.phrase(ctx, PhraseInput{Event: EventOutstandingList, Language: raw.Language, Items: items})
+	text, err := p.phrase(ctx, PhraseInput{Event: EventOutstandingList, Language: raw.Language, Items: items})
+	return textReply(text), err
 }
 
-func (p *Processor) executeGetTotalOutstanding(ctx context.Context, msg InboundMessage, raw RawIntent) (string, error) {
+func (p *Processor) executeGetTotalOutstanding(ctx context.Context, msg InboundMessage, raw RawIntent) (Reply, error) {
 	summaries, err := ledger.SummaryByUser(ctx, p.cfg.Pool, msg.UserID)
 	if err != nil {
-		return "", err
+		return Reply{}, err
 	}
 	var total int64
 	if len(summaries) > 0 {
 		total = summaries[0].TotalOutstandingMinor
 	}
-	return p.phrase(ctx, PhraseInput{Event: EventTotalOutstanding, Language: raw.Language, OutstandingMinor: &total})
+	text, err := p.phrase(ctx, PhraseInput{Event: EventTotalOutstanding, Language: raw.Language, OutstandingMinor: &total})
+	return textReply(text), err
 }
 
-func (p *Processor) executeGetPaymentSummary(ctx context.Context, msg InboundMessage, raw RawIntent) (string, error) {
+func (p *Processor) executeGetPaymentSummary(ctx context.Context, msg InboundMessage, raw RawIntent) (Reply, error) {
 	summaries, err := ledger.SummaryByUser(ctx, p.cfg.Pool, msg.UserID)
 	if err != nil {
-		return "", err
+		return Reply{}, err
 	}
 	var s ledger.Summary
 	if len(summaries) > 0 {
 		s = summaries[0]
 	}
-	return p.phrase(ctx, PhraseInput{
+	text, err := p.phrase(ctx, PhraseInput{
 		Event:            EventPaymentSummary,
 		Language:         raw.Language,
 		AmountMinor:      &s.TotalCreditIssuedMinor,
 		OutstandingMinor: &s.TotalOutstandingMinor,
 		CollectedMinor:   &s.TotalCollectedMinor,
 	})
+	return textReply(text), err
 }
 
 func (p *Processor) rememberLastCustomer(ctx context.Context, userID, customerID int64) {
@@ -645,9 +786,6 @@ func (p *Processor) rememberLastCustomer(ctx context.Context, userID, customerID
 	}
 }
 
-// phrase calls the Phraser, or falls back to a fixed generic-error
-// string if none is configured (tests that don't care about phrasing
-// output can leave Phraser nil).
 // phrase calls the Phraser and enforces the boundary from the backend
 // side: isGrounded checks that every number in the reply traces back to
 // a field actually present in input (plan decision #7). "Terminal"

@@ -34,9 +34,17 @@ type Phraser interface {
 }
 
 // Sender dispatches Ruby's reply back over WhatsApp. Satisfied by
-// *whatsapp.Service; ai never imports whatsapp — see plan decision #10.
+// *whatsapp.Service; ai never imports whatsapp — see plan decision #10
+// (whatsapp importing ai's Button/ListSection types to satisfy this is
+// fine — it's one-directional and doesn't reintroduce that cycle).
+// SendButtons/SendList are an enhancement over SendText, not a
+// replacement (docs/BRIEF-interactive-messages.md) — Processor always
+// has correct Reply.Text ready and only reaches for these when a reply
+// actually has buttons/a list attached.
 type Sender interface {
 	SendText(ctx context.Context, to, body string) error
+	SendButtons(ctx context.Context, to, body string, buttons []Button) error
+	SendList(ctx context.Context, to, body, buttonLabel string, sections []ListSection) error
 }
 
 // MediaDownloader fetches the bytes behind a WhatsApp media id (spec

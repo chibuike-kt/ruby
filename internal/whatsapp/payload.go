@@ -52,22 +52,40 @@ type Profile struct {
 	Name string `json:"name"`
 }
 
-// Message is one entry in value.messages[]. Only Text and Audio are
-// populated depending on Type — other message types (image, document,
-// location, ...) are accepted and stored with an empty content
-// reference rather than rejected, per spec §37 (malformed/unexpected
-// input must not crash the handler).
+// Message is one entry in value.messages[]. Only Text, Audio, and
+// Interactive are populated depending on Type — other message types
+// (image, document, location, ...) are accepted and stored with an
+// empty content reference rather than rejected, per spec §37
+// (malformed/unexpected input must not crash the handler).
 type Message struct {
-	From      string `json:"from"`
-	ID        string `json:"id"`
-	Timestamp string `json:"timestamp"`
-	Type      string `json:"type"`
-	Text      *Text  `json:"text,omitempty"`
-	Audio     *Media `json:"audio,omitempty"`
+	From        string       `json:"from"`
+	ID          string       `json:"id"`
+	Timestamp   string       `json:"timestamp"`
+	Type        string       `json:"type"`
+	Text        *Text        `json:"text,omitempty"`
+	Audio       *Media       `json:"audio,omitempty"`
+	Interactive *Interactive `json:"interactive,omitempty"`
 }
 
 type Text struct {
 	Body string `json:"body"`
+}
+
+// Interactive is populated when Type == "interactive": a trader tapped
+// a reply button or a list option Ruby sent earlier
+// (docs/BRIEF-interactive-messages.md). Exactly one of ButtonReply/
+// ListReply is set, matching Interactive.Type ("button_reply" or
+// "list_reply") — both carry the id Ruby chose when building the
+// button/list, never free text.
+type Interactive struct {
+	Type        string            `json:"type"`
+	ButtonReply *InteractiveReply `json:"button_reply,omitempty"`
+	ListReply   *InteractiveReply `json:"list_reply,omitempty"`
+}
+
+type InteractiveReply struct {
+	ID    string `json:"id"`
+	Title string `json:"title"`
 }
 
 // Media covers audio (and would cover other media types, if this slice

@@ -20,10 +20,12 @@ const (
 )
 
 // PendingCandidateOption is one candidate in a disambiguation prompt —
-// enough to match a trader's reply locally (see disambiguate.go) without
-// a second AI call.
+// enough to match a trader's reply locally (see disambiguate.go)
+// without a second AI call, and enough to rebuild the same
+// buttons/list on a re-ask (Name, for the button/row title).
 type PendingCandidateOption struct {
 	CustomerID int64
+	Name       string
 	Phone      string
 	Hint       string
 }

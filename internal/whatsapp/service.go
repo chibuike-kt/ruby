@@ -14,6 +14,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/chibuike-kt/ruby/internal/account"
+	"github.com/chibuike-kt/ruby/internal/ai"
 	"github.com/chibuike-kt/ruby/internal/db"
 	"github.com/chibuike-kt/ruby/internal/idempotency"
 )
@@ -77,24 +78,54 @@ func (s *Service) SetHandler(h Handler) {
 
 // SendText sends a text reply and durably records it as an outbound
 // message (spec §39 audit trail), mirroring how an inbound message is
-// stored. The account lookup is best-effort: a failure to attribute the
-// row to a user_id doesn't stop the reply from being recorded.
+// stored.
 func (s *Service) SendText(ctx context.Context, to, body string) error {
 	id, err := sendText(ctx, s.accessToken, s.phoneNumberID, to, body)
 	if err != nil {
 		return err
 	}
+	return s.recordOutbound(ctx, to, id, "text", body)
+}
 
+// SendButtons sends up to 3 reply buttons alongside body — the
+// disambiguation/confirmation upgrade from
+// docs/BRIEF-interactive-messages.md. buttons is []ai.Button rather
+// than a whatsapp-local type because ai.Sender (satisfied structurally
+// by *Service) already defines the shape it needs; whatsapp importing
+// ai here is one-directional and doesn't reintroduce the construction-
+// order cycle SetHandler exists to break (ai still never imports
+// whatsapp).
+func (s *Service) SendButtons(ctx context.Context, to, body string, buttons []ai.Button) error {
+	id, err := sendInteractiveButtons(ctx, s.accessToken, s.phoneNumberID, to, body, buttons)
+	if err != nil {
+		return err
+	}
+	return s.recordOutbound(ctx, to, id, "interactive", body)
+}
+
+// SendList sends a WhatsApp list message (4-10 options) alongside body.
+func (s *Service) SendList(ctx context.Context, to, body, buttonLabel string, sections []ai.ListSection) error {
+	id, err := sendInteractiveList(ctx, s.accessToken, s.phoneNumberID, to, body, buttonLabel, sections)
+	if err != nil {
+		return err
+	}
+	return s.recordOutbound(ctx, to, id, "interactive", body)
+}
+
+// recordOutbound is shared by every Send* method. The account lookup is
+// best-effort: a failure to attribute the row to a user_id doesn't stop
+// the reply from being recorded.
+func (s *Service) recordOutbound(ctx context.Context, to, providerMessageID, messageType, body string) error {
 	var userID *int64
 	if a, acctErr := account.GetByPhoneNumber(ctx, s.pool, to); acctErr == nil {
 		userID = &a.ID
 	}
 
-	_, err = insertMessage(ctx, s.pool, StoredMessage{
+	_, err := insertMessage(ctx, s.pool, StoredMessage{
 		UserID:            userID,
-		ProviderMessageID: id,
+		ProviderMessageID: providerMessageID,
 		Direction:         directionOutbound,
-		MessageType:       "text",
+		MessageType:       messageType,
 		ContentReference:  &body,
 		ProcessingStatus:  statusSent,
 	})
@@ -224,6 +255,16 @@ func contentReference(msg Message) *string {
 	case "audio":
 		if msg.Audio != nil {
 			return &msg.Audio.ID
+		}
+	case "interactive":
+		if msg.Interactive == nil {
+			return nil
+		}
+		if msg.Interactive.ButtonReply != nil {
+			return &msg.Interactive.ButtonReply.ID
+		}
+		if msg.Interactive.ListReply != nil {
+			return &msg.Interactive.ListReply.ID
 		}
 	}
 	return nil

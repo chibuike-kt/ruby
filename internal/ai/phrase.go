@@ -94,6 +94,26 @@ var unsupportedMessageTypeText = map[Language]string{
 	LangHausa:   "Zan iya fahimtar rubutu ko sako na murya kawai a yanzu.",
 }
 
+// editPromptText and cancelledText answer the "Edit"/"Cancel" buttons
+// on a confirmation prompt (docs/BRIEF-interactive-messages.md). Fixed
+// strings, not a Phraser call, for the same reason as helpText et al.:
+// no dynamic outcome to phrase.
+var editPromptText = map[Language]string{
+	LangEnglish: "No problem — just send the correct details and I'll try again.",
+	LangPidgin:  "No wahala — just send the correct details make I try again.",
+	LangYoruba:  "Kò sí ìṣòro — fi àwọn kúlẹ̀kúlẹ̀ tí ó tọ́ ránṣẹ́, kí n gbìyànjú lẹ́ẹ̀kan sí i.",
+	LangIgbo:    "Ọ dịghị nsogbu — zipu nkọwa ziri ezi, m ga-anwa ọzọ.",
+	LangHausa:   "Babu matsala — kawai aika daidaitattun bayanai, in sake gwadawa.",
+}
+
+var cancelledText = map[Language]string{
+	LangEnglish: "Okay, cancelled — nothing was recorded.",
+	LangPidgin:  "Okay, I cancel am — nothing enter book.",
+	LangYoruba:  "Ó dára, ó ti fagilé — a kò ṣàkọsílẹ̀ ohunkóhun.",
+	LangIgbo:    "Ọ dị mma, ekagbuola ya — ọ dịghị ihe edekọrọ.",
+	LangHausa:   "To, an soke — ba a rubuta komai ba.",
+}
+
 // genericErrorText is spec §37's "never respond with an unexplained
 // technical error" fallback — used both when no Phraser is configured
 // and when the Phraser call itself fails, so an AI outage never leaves a
