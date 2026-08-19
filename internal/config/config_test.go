@@ -11,6 +11,8 @@ func TestLoad_Defaults(t *testing.T) {
 	t.Setenv("REDIS_URL", "redis://localhost:6379/0")
 	t.Setenv("PORT", "")
 	t.Setenv("RATE_LIMIT_PER_MINUTE", "")
+	t.Setenv("AI_MODEL", "")
+	t.Setenv("DEFAULT_TIMEZONE", "")
 
 	cfg, err := config.Load()
 	if err != nil {
@@ -21,6 +23,12 @@ func TestLoad_Defaults(t *testing.T) {
 	}
 	if cfg.RateLimitPerMinute != 30 {
 		t.Fatalf("got rate limit %d, want 30", cfg.RateLimitPerMinute)
+	}
+	if cfg.AIModel != "gpt-5.6-terra" {
+		t.Fatalf("got AI model %q, want gpt-5.6-terra", cfg.AIModel)
+	}
+	if cfg.DefaultTimezone != "Africa/Lagos" {
+		t.Fatalf("got default timezone %q, want Africa/Lagos", cfg.DefaultTimezone)
 	}
 }
 

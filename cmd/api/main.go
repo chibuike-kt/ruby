@@ -11,6 +11,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/chibuike-kt/ruby/internal/ai"
+	"github.com/chibuike-kt/ruby/internal/ai/ffmpeg"
+	"github.com/chibuike-kt/ruby/internal/ai/openai"
 	"github.com/chibuike-kt/ruby/internal/config"
 	"github.com/chibuike-kt/ruby/internal/customer"
 	"github.com/chibuike-kt/ruby/internal/db"
@@ -42,13 +45,53 @@ func main() {
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 
+	customers := customer.NewService(pool)
+	debts := debt.NewService(pool)
+	payments := payment.NewService(pool)
+
+	whatsappService := whatsapp.NewService(pool, redisClient, cfg.WhatsAppAppSecret, cfg.WhatsAppVerifyToken,
+		cfg.WhatsAppAccessToken, cfg.WhatsAppPhoneNumberID, logger)
+
+	// The AI processor needs whatsappService (to send replies / download
+	// media) and whatsappService needs the processor (to handle inbound
+	// messages) — a genuine two-way wiring dependency, broken by
+	// deferring the handler's own reference until after processor is
+	// assigned. The closure is never invoked until a real webhook
+	// arrives, long after both are fully constructed. See plan decision
+	// #10 in docs/BRIEF-ai-intent.md's implementation.
+	var processor *ai.Processor
+	whatsappService.SetHandler(func(ctx context.Context, msg whatsapp.StoredMessage) {
+		userID := int64(0)
+		if msg.UserID != nil {
+			userID = *msg.UserID
+		}
+		// Handle already logs failures and sends the reply itself
+		// (via Sender); the returned values here are for tests only.
+		_, _ = processor.Handle(ctx, ai.ToInboundMessage(userID, msg.ProviderMessageID, msg.MessageType, msg.ContentReference))
+	})
+
+	processor = ai.NewProcessor(ai.Config{
+		Extractor:   openai.NewExtractor(cfg.AIProviderAPIKey, cfg.AIModel, cfg.DefaultTimezone),
+		Transcriber: openai.NewTranscriber(cfg.AIProviderAPIKey),
+		Transcoder:  ffmpeg.New(),
+		Phraser:     openai.NewPhraser(cfg.AIProviderAPIKey),
+		Sender:      whatsappService,
+		Media:       whatsappService,
+		Pool:        pool,
+		Redis:       redisClient,
+		Customers:   customers,
+		Debts:       debts,
+		Payments:    payments,
+		Logger:      logger,
+	})
+
 	server := &httpserver.Server{
 		Pool:               pool,
 		Redis:              redisClient,
-		Customers:          customer.NewService(pool),
-		Debts:              debt.NewService(pool),
-		Payments:           payment.NewService(pool),
-		Webhooks:           whatsapp.NewService(pool, redisClient, cfg.WhatsAppAppSecret, cfg.WhatsAppVerifyToken, logger),
+		Customers:          customers,
+		Debts:              debts,
+		Payments:           payments,
+		Webhooks:           whatsappService,
 		RateLimitPerMinute: cfg.RateLimitPerMinute,
 		Logger:             logger,
 	}
