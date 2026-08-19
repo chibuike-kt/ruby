@@ -84,3 +84,47 @@ func TestGreetingReply_IntroducesRubyAndOffersMenu(t *testing.T) {
 		}
 	}
 }
+
+func TestLooksLikeName_AcceptsPlausibleNames(t *testing.T) {
+	cases := []string{"Chinedu", "Mama Ngozi", "Ade", "Chinedu Okafor", "Ngozi-Chukwu"}
+	for _, text := range cases {
+		if !looksLikeName(text) {
+			t.Errorf("looksLikeName(%q) = false, want true", text)
+		}
+	}
+}
+
+func TestLooksLikeName_RejectsRequestShapedReplies(t *testing.T) {
+	cases := []string{
+		"",
+		"   ",
+		"5k",
+		"Chinedu took 5k",
+		"₦75,000",
+		"NGN 75000",
+		"Chinedu paid me 30k on Friday for the noodles order",
+		"08031234567",
+	}
+	for _, text := range cases {
+		if looksLikeName(text) {
+			t.Errorf("looksLikeName(%q) = true, want false", text)
+		}
+	}
+}
+
+func TestTruncateName_CapsLength(t *testing.T) {
+	long := ""
+	for range 100 {
+		long += "a"
+	}
+	got := truncateName(long)
+	if len([]rune(got)) != maxNameLength {
+		t.Fatalf("got length %d, want %d", len([]rune(got)), maxNameLength)
+	}
+}
+
+func TestTruncateName_ShortNameUnchanged(t *testing.T) {
+	if got := truncateName("  Chinedu  "); got != "Chinedu" {
+		t.Fatalf("got %q, want trimmed \"Chinedu\"", got)
+	}
+}

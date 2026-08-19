@@ -23,7 +23,6 @@ const (
 	directionInbound  = "INBOUND"
 	directionOutbound = "OUTBOUND"
 	statusReceived    = "RECEIVED"
-	statusUnknownUser = "UNKNOWN_USER"
 	statusSent        = "SENT"
 
 	// dedupTTL matches the "a few minutes" guidance from
@@ -161,7 +160,6 @@ type Outcome struct {
 	ProviderMessageID string
 	MessageType       string
 	Duplicate         bool
-	UnknownSender     bool
 	Stored            bool
 }
 
@@ -207,29 +205,18 @@ func (s *Service) receiveMessage(ctx context.Context, msg Message) (Outcome, err
 		return outcome, nil
 	}
 
-	var userID *int64
-	a, err := account.GetByPhoneNumber(ctx, s.pool, normalizePhone(msg.From))
-	switch {
-	case err == nil:
-		userID = &a.ID
-	case errors.Is(err, account.ErrNotFound):
-		outcome.UnknownSender = true
-	default:
+	userID, err := s.resolveOrCreateUser(ctx, msg.From)
+	if err != nil {
 		return outcome, err
 	}
 
-	status := statusReceived
-	if outcome.UnknownSender {
-		status = statusUnknownUser
-	}
-
 	stored, err := insertMessage(ctx, s.pool, StoredMessage{
-		UserID:            userID,
+		UserID:            &userID,
 		ProviderMessageID: msg.ID,
 		Direction:         directionInbound,
 		MessageType:       msg.Type,
 		ContentReference:  contentReference(msg),
-		ProcessingStatus:  status,
+		ProcessingStatus:  statusReceived,
 	})
 	if err != nil {
 		if db.IsUniqueViolation(err, providerMessageIDConstraint) {
@@ -244,6 +231,25 @@ func (s *Service) receiveMessage(ctx context.Context, msg Message) (Outcome, err
 	go s.handOff(context.WithoutCancel(ctx), stored)
 
 	return outcome, nil
+}
+
+// resolveOrCreateUser looks up the sender's account, auto-creating one
+// with an empty name on first contact (docs/BRIEF-response-quality.md
+// #1) — Ruby's whole premise is zero-friction onboarding, so a message
+// from an unrecognized phone number claims the number immediately
+// rather than sitting unprocessable until someone manually registers
+// it. internal/ai's name-capture flow asks for the name and fills it
+// in; this layer only needs the account to exist.
+func (s *Service) resolveOrCreateUser(ctx context.Context, from string) (int64, error) {
+	phone := normalizePhone(from)
+	a, err := account.GetByPhoneNumber(ctx, s.pool, phone)
+	if errors.Is(err, account.ErrNotFound) {
+		a, err = account.Create(ctx, s.pool, phone)
+	}
+	if err != nil {
+		return 0, err
+	}
+	return a.ID, nil
 }
 
 func contentReference(msg Message) *string {
@@ -283,18 +289,15 @@ func normalizePhone(from string) string {
 }
 
 // handOff dispatches a durably-stored message to the real processing
-// pipeline (internal/ai, wired in via SetHandler). A message from an
-// unrecognized sender (msg.UserID nil) has nothing to attribute AI
-// actions to, so it's left stored-but-unprocessed rather than handed
-// off. With no handler configured, this falls back to logging that a
-// message arrived — deliberately never the message body or sender's
-// number, since spec §36 forbids exactly that and being a fallback
-// doesn't exempt it.
+// pipeline (internal/ai, wired in via SetHandler). Every inbound
+// message now carries a user_id — resolveOrCreateUser guarantees the
+// account exists before insertMessage ever runs — so there's no
+// "unrecognized sender" case left to skip. With no handler configured,
+// this falls back to logging that a message arrived — deliberately
+// never the message body or sender's number, since spec §36 forbids
+// exactly that and being a fallback doesn't exempt it.
 func (s *Service) handOff(ctx context.Context, msg StoredMessage) {
 	if s.handler != nil {
-		if msg.UserID == nil {
-			return
-		}
 		s.handler(ctx, msg)
 		return
 	}

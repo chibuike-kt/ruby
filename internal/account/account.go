@@ -1,8 +1,9 @@
-// Package account provides read access to the users table (spec §4).
-// It exists for the API layer's temporary auth middleware to resolve a
-// caller-supplied user id against a real account — full account
-// management (recovery, phone-number change, spec §26/§27) is out of
-// scope for this slice.
+// Package account provides access to the users table (spec §4): reads
+// for the API layer's temporary auth middleware, and the writes
+// auto-onboarding needs (Create on first contact, SetName once a
+// trader's name is captured — docs/BRIEF-response-quality.md #1). Full
+// account management (recovery, phone-number change, spec §26/§27) is
+// still out of scope for this slice.
 package account
 
 import (
@@ -45,6 +46,27 @@ func GetByPhoneNumber(ctx context.Context, q db.Querier, phone string) (Account,
 		FROM users WHERE phone_number = $1
 	`, phone)
 	return scan(row)
+}
+
+// Create inserts a new user row with an empty name — auto-onboarding
+// (docs/BRIEF-response-quality.md #1): Ruby never guesses a trader's
+// name from their WhatsApp profile, it asks, and the phone number is
+// claimed immediately so idempotency/dedup work normally from the
+// first message. name is filled in later via SetName.
+func Create(ctx context.Context, q db.Querier, phone string) (Account, error) {
+	row := q.QueryRow(ctx, `
+		INSERT INTO users (name, phone_number) VALUES ('', $1)
+		RETURNING id, name, phone_number, business_name, created_at, updated_at
+	`, phone)
+	return scan(row)
+}
+
+// SetName saves a trader's captured name (or a placeholder — see
+// internal/ai's name-capture flow) once the auto-onboarding question is
+// answered.
+func SetName(ctx context.Context, q db.Querier, id int64, name string) error {
+	_, err := q.Exec(ctx, `UPDATE users SET name = $1, updated_at = now() WHERE id = $2`, name, id)
+	return err
 }
 
 func scan(row pgx.Row) (Account, error) {
