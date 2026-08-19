@@ -17,6 +17,7 @@ type PendingKind string
 const (
 	PendingConfirm              PendingKind = "confirm"
 	PendingDisambiguateCustomer PendingKind = "disambiguate_customer"
+	PendingAwaitingName         PendingKind = "awaiting_name"
 )
 
 // PendingCandidateOption is one candidate in a disambiguation prompt —
@@ -30,14 +31,79 @@ type PendingCandidateOption struct {
 	Hint       string
 }
 
-// PendingAction is a RawIntent parked in Redis awaiting one more piece of
-// trader input before Processor executes it — either a confirmation or a
-// disambiguation reply (plan decision #3). Kind, not a separate store per
-// case, since both are "the same intent, needs one more answer."
+// PendingOriginalMessage preserves a trader's original message verbatim
+// while their name is being captured
+// (docs/BRIEF-response-quality.md #1) — replayed through
+// Processor.process once a name is known (see acceptName), so a trader
+// whose first message was a real request never has to repeat
+// themselves. Mirrors InboundMessage's shape rather than embedding it
+// directly, so this package's Redis-serialized state doesn't couple to
+// InboundMessage's field set changing shape later.
+type PendingOriginalMessage struct {
+	ProviderMessageID string
+	Type              string // "text", "audio", or "interactive"
+	Text              *string
+	MediaID           *string
+	InteractiveID     *string
+}
+
+// originalMessageFrom captures msg for later replay.
+func originalMessageFrom(msg InboundMessage) *PendingOriginalMessage {
+	return &PendingOriginalMessage{
+		ProviderMessageID: msg.ProviderMessageID,
+		Type:              msg.Type,
+		Text:              msg.Text,
+		MediaID:           msg.MediaID,
+		InteractiveID:     msg.InteractiveID,
+	}
+}
+
+// toInboundMessage reconstructs the original message for the given
+// user so it can be run back through Processor.process.
+func (o *PendingOriginalMessage) toInboundMessage(userID int64) InboundMessage {
+	return InboundMessage{
+		UserID:            userID,
+		ProviderMessageID: o.ProviderMessageID,
+		Type:              o.Type,
+		Text:              o.Text,
+		MediaID:           o.MediaID,
+		InteractiveID:     o.InteractiveID,
+	}
+}
+
+// isBareGreeting reports whether the original message was nothing but a
+// greeting — if so, acceptName doesn't replay it (plan step 6: "if the
+// original first message had real content beyond a greeting"). A nil
+// original (nothing was ever captured) counts as bare — there's nothing
+// to replay either way. Audio/interactive originals are always treated
+// as real content: transcribing just to check would defeat the point of
+// this being a cheap, deterministic check, and a button tap is
+// explicitly "a clear, valid intent" per plan step 4, never a bare
+// greeting.
+func (o *PendingOriginalMessage) isBareGreeting() bool {
+	if o == nil {
+		return true
+	}
+	if o.Type != "text" || o.Text == nil {
+		return false
+	}
+	_, ok := greetingLanguage(*o.Text)
+	return ok
+}
+
+// PendingAction is parked in Redis awaiting one more piece of trader
+// input before Processor executes it — a confirmation, a disambiguation
+// reply, or (per docs/BRIEF-response-quality.md #1) a name. Kind, not a
+// separate store per case, since all three are "the same intent, needs
+// one more answer."
 type PendingAction struct {
 	Kind       PendingKind
 	Intent     RawIntent
 	Candidates []PendingCandidateOption
+
+	// OriginalMessage and ReaskCount are used by PendingAwaitingName only.
+	OriginalMessage *PendingOriginalMessage
+	ReaskCount      int
 }
 
 // DefaultPendingTTL matches the conversational-context window the rest

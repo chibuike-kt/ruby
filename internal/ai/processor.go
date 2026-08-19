@@ -116,7 +116,7 @@ func (p *Processor) Handle(ctx context.Context, msg InboundMessage) (Reply, erro
 		return Reply{}, err
 	}
 
-	reply, lang, procErr := p.process(ctx, msg)
+	reply, lang, procErr := p.process(ctx, msg, acct)
 	if procErr != nil {
 		p.logf("ai processing failed", "error", procErr)
 		reply = textReply(fixedText(genericErrorText, lang))
@@ -145,7 +145,15 @@ func (p *Processor) send(ctx context.Context, to string, reply Reply) error {
 	}
 }
 
-func (p *Processor) process(ctx context.Context, msg InboundMessage) (Reply, Language, error) {
+func (p *Processor) process(ctx context.Context, msg InboundMessage, acct account.Account) (Reply, Language, error) {
+	// An account with no name yet is either a brand-new contact or one
+	// that dropped off mid-onboarding — either way, name capture takes
+	// priority over everything else (docs/BRIEF-response-quality.md #1).
+	// Once a name is set, this is never reached again for that account.
+	if acct.Name == "" {
+		return p.handleNameCapture(ctx, msg)
+	}
+
 	pending, hasPending, err := GetPendingAction(ctx, p.cfg.Redis, msg.UserID)
 	if err != nil {
 		return Reply{}, LangEnglish, err
@@ -175,9 +183,14 @@ func (p *Processor) process(ctx context.Context, msg InboundMessage) (Reply, Lan
 
 	// A bare greeting must never reach the financial-intent extractor
 	// (docs/BRIEF-interactive-messages.md) — checked before any AI call
-	// at all, not as a possible classification outcome of one.
+	// at all, not as a possible classification outcome of one. By this
+	// point acct.Name is guaranteed non-empty (handleNameCapture already
+	// intercepted the nameless case above), so every greeting here is a
+	// returning trader — docs/BRIEF-response-quality.md #2: it should
+	// feel like talking to an assistant that knows you, not a fresh
+	// pitch on every "hi."
 	if lang, ok := greetingLanguage(text); ok {
-		return greetingReply(lang), lang, nil
+		return returningGreetingReply(lang, acct.Name), lang, nil
 	}
 
 	raw, err := p.cfg.Extractor.Extract(ctx, text)
@@ -728,21 +741,42 @@ func (p *Processor) executeListCustomers(ctx context.Context, msg InboundMessage
 	return textReply(text), err
 }
 
+// executeListOutstandingDebts is built deterministically in Go, not
+// phrased by the AI (docs/BRIEF-response-quality.md #4/#5): a list is
+// exactly the highest-risk surface for the model to drop or alter a
+// number, and the formatting spec here (bold name, amount+due date,
+// blank line between entries, a total when there's more than one
+// debtor) is already precise enough to just build directly — this also
+// means the list can never conflict with the isGrounded backstop, since
+// no model call happens for it at all. The empty state gets its own
+// fixed, warm message rather than an awkward empty list or a Phraser
+// call that might render nothing usefully.
 func (p *Processor) executeListOutstandingDebts(ctx context.Context, msg InboundMessage, raw RawIntent) (Reply, error) {
 	debts, err := p.cfg.Debts.ListOutstanding(ctx, msg.UserID)
 	if err != nil {
 		return Reply{}, err
 	}
-	items := make([]string, len(debts))
+	if len(debts) == 0 {
+		return textReply(fixedText(noOutstandingDebtsText, raw.Language)), nil
+	}
+
+	lines := make([]outstandingDebtLine, len(debts))
+	var totalMinor int64
 	for i, d := range debts {
 		c, err := customer.GetByID(ctx, p.cfg.Pool, msg.UserID, d.CustomerID)
 		if err != nil {
 			return Reply{}, err
 		}
-		items[i] = fmt.Sprintf("%s: %d", c.Name, d.Amount.MinorUnits())
+		paid, err := payment.SumByDebt(ctx, p.cfg.Pool, d.ID)
+		if err != nil {
+			return Reply{}, err
+		}
+		outstandingMinor := d.Amount.MinorUnits() - paid
+		lines[i] = outstandingDebtLine{customerName: c.Name, outstandingMinor: outstandingMinor, dueDate: d.DueDate}
+		totalMinor += outstandingMinor
 	}
-	text, err := p.phrase(ctx, PhraseInput{Event: EventOutstandingList, Language: raw.Language, Items: items})
-	return textReply(text), err
+
+	return textReply(formatOutstandingDebtsList(lines, totalMinor, raw.Language)), nil
 }
 
 func (p *Processor) executeGetTotalOutstanding(ctx context.Context, msg InboundMessage, raw RawIntent) (Reply, error) {

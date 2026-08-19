@@ -473,8 +473,13 @@ func TestProcessor_Multilingual(t *testing.T) {
 	for i, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			userID := dbtest.CreateUser(t, pool, fmt.Sprintf("+234806000%04d", i))
+			// GET_TOTAL_OUTSTANDING (not LIST_OUTSTANDING_DEBTS, which is
+			// now formatted deterministically in Go and never reaches the
+			// Phraser — see format.go) is the vehicle here: this test is
+			// about language detection flowing through to the Phraser
+			// call, not about the list-formatting feature itself.
 			extractor := &fakeExtractor{results: []ai.RawIntent{
-				{Intent: ai.IntentListOutstandingDebts, Language: tc.lang},
+				{Intent: ai.IntentGetTotalOutstanding, Language: tc.lang},
 			}}
 			phraser := &fakePhraser{}
 			sender := &fakeSender{}
@@ -490,8 +495,8 @@ func TestProcessor_Multilingual(t *testing.T) {
 			if last.Language != tc.lang {
 				t.Fatalf("got phrase language %q, want %q", last.Language, tc.lang)
 			}
-			if last.Event != ai.EventOutstandingList {
-				t.Fatalf("got phrase event %v, want EventOutstandingList", last.Event)
+			if last.Event != ai.EventTotalOutstanding {
+				t.Fatalf("got phrase event %v, want EventTotalOutstanding", last.Event)
 			}
 		})
 	}
@@ -1009,10 +1014,15 @@ func TestProcessor_GreetingMenuButton_Balance(t *testing.T) {
 	if len(extractor.calls) != 0 {
 		t.Fatalf("got %d extractor calls for a menu button tap, want 0", len(extractor.calls))
 	}
-	if phraser.last().Event != ai.EventOutstandingList {
-		t.Fatalf("got phrase event %v, want EventOutstandingList", phraser.last().Event)
+	// LIST_OUTSTANDING_DEBTS is now formatted deterministically (see
+	// format.go) and never reaches the Phraser at all.
+	if len(phraser.inputs) != 0 {
+		t.Fatalf("got %d Phraser calls, want 0 — the outstanding-debts list is built deterministically", len(phraser.inputs))
 	}
-	if reply.Text == "" {
-		t.Fatal("got an empty reply")
+	if !strings.Contains(reply.Text, "Chinedu") {
+		t.Fatalf("got reply %q, want it to mention Chinedu", reply.Text)
+	}
+	if !strings.Contains(reply.Text, "75,000") {
+		t.Fatalf("got reply %q, want the formatted outstanding amount", reply.Text)
 	}
 }
