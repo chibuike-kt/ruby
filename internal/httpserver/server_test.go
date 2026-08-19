@@ -19,6 +19,12 @@ import (
 	"github.com/chibuike-kt/ruby/internal/debt"
 	"github.com/chibuike-kt/ruby/internal/httpserver"
 	"github.com/chibuike-kt/ruby/internal/payment"
+	"github.com/chibuike-kt/ruby/internal/whatsapp"
+)
+
+const (
+	testWhatsAppSecret      = "test-webhook-secret" //nolint:gosec // test fixture, not a real secret
+	testWhatsAppVerifyToken = "test-verify-token"
 )
 
 // testEnv bundles a wired router with the raw pool/redis handles tests
@@ -36,14 +42,16 @@ func newTestEnv(t *testing.T) testEnv {
 	pool := dbtest.Open(t)
 	rdb := dbtest.OpenRedis(t)
 
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	srv := &httpserver.Server{
 		Pool:               pool,
 		Redis:              rdb,
 		Customers:          customer.NewService(pool),
 		Debts:              debt.NewService(pool),
 		Payments:           payment.NewService(pool),
+		Webhooks:           whatsapp.NewService(pool, rdb, testWhatsAppSecret, testWhatsAppVerifyToken, logger),
 		RateLimitPerMinute: 1000, // high enough that handler tests don't trip it; rate limiting has its own tests
-		Logger:             slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Logger:             logger,
 	}
 
 	return testEnv{router: httpserver.NewRouter(srv), pool: pool, redis: rdb}

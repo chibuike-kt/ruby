@@ -17,6 +17,7 @@ import (
 	"github.com/chibuike-kt/ruby/internal/debt"
 	"github.com/chibuike-kt/ruby/internal/httpserver"
 	"github.com/chibuike-kt/ruby/internal/payment"
+	"github.com/chibuike-kt/ruby/internal/whatsapp"
 )
 
 func main() {
@@ -47,6 +48,7 @@ func main() {
 		Customers:          customer.NewService(pool),
 		Debts:              debt.NewService(pool),
 		Payments:           payment.NewService(pool),
+		Webhooks:           whatsapp.NewService(pool, redisClient, cfg.WhatsAppAppSecret, cfg.WhatsAppVerifyToken, logger),
 		RateLimitPerMinute: cfg.RateLimitPerMinute,
 		Logger:             logger,
 	}

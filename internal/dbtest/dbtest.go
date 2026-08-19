@@ -73,11 +73,11 @@ func CreateUser(t *testing.T, pool *pgxpool.Pool, phone string) int64 {
 	return id
 }
 
-// InsertMessage inserts a raw row into the messages table, bypassing any
-// service layer — no package owns webhook message persistence yet
-// (that's Slice 2's internal/whatsapp). It's used to exercise the
-// provider_message_id unique index directly, e.g. to prove Postgres
-// still catches a duplicate event when Redis's dedup fast-path misses.
+// InsertMessage inserts a raw row into the messages table, bypassing
+// internal/whatsapp's own service layer. It's used to exercise the
+// provider_message_id unique index directly, independent of any Go
+// service code, e.g. to prove Postgres still catches a duplicate event
+// when Redis's dedup fast-path misses.
 func InsertMessage(t *testing.T, pool *pgxpool.Pool, userID int64, providerMessageID string) error {
 	t.Helper()
 	_, err := pool.Exec(context.Background(), `
