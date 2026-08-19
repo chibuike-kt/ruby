@@ -409,13 +409,19 @@ func (p *Processor) executeCreateDebt(ctx context.Context, msg InboundMessage, r
 	if d.DueDate != nil {
 		dueDateISO = d.DueDate.Format(time.DateOnly)
 	}
+	// A freshly created debt has no payments against it yet, so
+	// outstanding always equals the full amount — never leave this
+	// unset (a bug previously did, which the model then read as a
+	// genuine ₦0 outstanding balance; see isGrounded/allowedNumbers).
+	amountMinor := d.Amount.MinorUnits()
 	return p.phrase(ctx, PhraseInput{
-		Event:        EventDebtCreated,
-		Language:     raw.Language,
-		CustomerName: customerName,
-		AmountMinor:  d.Amount.MinorUnits(),
-		DueDateISO:   dueDateISO,
-		Description:  d.Description,
+		Event:            EventDebtCreated,
+		Language:         raw.Language,
+		CustomerName:     customerName,
+		AmountMinor:      &amountMinor,
+		OutstandingMinor: &amountMinor,
+		DueDateISO:       dueDateISO,
+		Description:      d.Description,
 	})
 }
 
@@ -477,12 +483,13 @@ func (p *Processor) executeRecordPayment(ctx context.Context, msg InboundMessage
 		return "", err
 	}
 
+	outstandingMinor := target.Amount.MinorUnits() - paidMinor
 	return p.phrase(ctx, PhraseInput{
 		Event:            EventPaymentRecorded,
 		Language:         raw.Language,
 		CustomerName:     c.Name,
-		AmountMinor:      result.Payment.AmountMinor,
-		OutstandingMinor: target.Amount.MinorUnits() - paidMinor,
+		AmountMinor:      &result.Payment.AmountMinor,
+		OutstandingMinor: &outstandingMinor,
 	})
 }
 
@@ -499,12 +506,13 @@ func (p *Processor) beginOverpaymentConfirmation(ctx context.Context, msg Inboun
 		return "", err
 	}
 
+	attempted := overpay.Attempted.MinorUnits()
 	return p.phrase(ctx, PhraseInput{
 		Event:            EventOverpaymentPrompt,
 		Language:         raw.Language,
 		CustomerName:     trimOrEmpty(raw.CustomerName),
-		OutstandingMinor: overpay.Outstanding.MinorUnits(),
-		AttemptedMinor:   overpay.Attempted.MinorUnits(),
+		OutstandingMinor: &outstanding,
+		AttemptedMinor:   &attempted,
 	})
 }
 
@@ -534,15 +542,14 @@ func (p *Processor) beginConfirmation(ctx context.Context, msg InboundMessage, r
 	if err := SetPendingAction(ctx, p.cfg.Redis, msg.UserID, PendingAction{Kind: PendingConfirm, Intent: raw}, DefaultPendingTTL); err != nil {
 		return "", err
 	}
-	amount := int64(0)
-	if raw.AmountMinor != nil {
-		amount = *raw.AmountMinor
-	}
+	// raw.AmountMinor is already *int64 — passed through as-is rather
+	// than defaulted to 0 when nil, so a genuinely-missing amount never
+	// masquerades as a real ₦0 in front of the phrasing model.
 	return p.phrase(ctx, PhraseInput{
 		Event:        EventConfirmationNeeded,
 		Language:     raw.Language,
 		CustomerName: trimOrEmpty(raw.CustomerName),
-		AmountMinor:  amount,
+		AmountMinor:  raw.AmountMinor,
 		DueDateISO:   trimOrEmpty(raw.DueDateISO),
 		Description:  trimOrEmpty(raw.Description),
 	})
@@ -568,7 +575,7 @@ func (p *Processor) executeGetCustomerBalance(ctx context.Context, msg InboundMe
 		}
 		outstanding += d.Amount.MinorUnits() - paid
 	}
-	return p.phrase(ctx, PhraseInput{Event: EventCustomerBalance, Language: raw.Language, CustomerName: c.Name, OutstandingMinor: outstanding})
+	return p.phrase(ctx, PhraseInput{Event: EventCustomerBalance, Language: raw.Language, CustomerName: c.Name, OutstandingMinor: &outstanding})
 }
 
 func (p *Processor) executeListCustomers(ctx context.Context, msg InboundMessage, raw RawIntent) (string, error) {
@@ -608,7 +615,7 @@ func (p *Processor) executeGetTotalOutstanding(ctx context.Context, msg InboundM
 	if len(summaries) > 0 {
 		total = summaries[0].TotalOutstandingMinor
 	}
-	return p.phrase(ctx, PhraseInput{Event: EventTotalOutstanding, Language: raw.Language, OutstandingMinor: total})
+	return p.phrase(ctx, PhraseInput{Event: EventTotalOutstanding, Language: raw.Language, OutstandingMinor: &total})
 }
 
 func (p *Processor) executeGetPaymentSummary(ctx context.Context, msg InboundMessage, raw RawIntent) (string, error) {
@@ -623,9 +630,9 @@ func (p *Processor) executeGetPaymentSummary(ctx context.Context, msg InboundMes
 	return p.phrase(ctx, PhraseInput{
 		Event:            EventPaymentSummary,
 		Language:         raw.Language,
-		AmountMinor:      s.TotalCreditIssuedMinor,
-		OutstandingMinor: s.TotalOutstandingMinor,
-		CollectedMinor:   s.TotalCollectedMinor,
+		AmountMinor:      &s.TotalCreditIssuedMinor,
+		OutstandingMinor: &s.TotalOutstandingMinor,
+		CollectedMinor:   &s.TotalCollectedMinor,
 	})
 }
 
@@ -641,11 +648,26 @@ func (p *Processor) rememberLastCustomer(ctx context.Context, userID, customerID
 // phrase calls the Phraser, or falls back to a fixed generic-error
 // string if none is configured (tests that don't care about phrasing
 // output can leave Phraser nil).
+// phrase calls the Phraser and enforces the boundary from the backend
+// side: isGrounded checks that every number in the reply traces back to
+// a field actually present in input (plan decision #7). "Terminal"
+// never meant unchecked — a reply that fails this check is a boundary
+// violation, not a phrasing choice, and never reaches the trader; a
+// fixed fallback is used instead (never one that claims failure for an
+// event that already succeeded — see fallbackText).
 func (p *Processor) phrase(ctx context.Context, input PhraseInput) (string, error) {
 	if p.cfg.Phraser == nil {
-		return fixedText(genericErrorText, input.Language), nil
+		return fallbackText(input.Event, input.Language), nil
 	}
-	return p.cfg.Phraser.Phrase(ctx, input)
+	text, err := p.cfg.Phraser.Phrase(ctx, input)
+	if err != nil {
+		return "", err
+	}
+	if !isGrounded(text, input) {
+		p.logf("phrasing stated a number not present in its input — using a safe fallback", "event", input.Event)
+		return fallbackText(input.Event, input.Language), nil
+	}
+	return text, nil
 }
 
 func (p *Processor) logf(msg string, args ...any) {

@@ -106,6 +106,18 @@ func (f fakeMedia) DownloadMedia(_ context.Context, _ string) ([]byte, string, e
 	return f.data, "audio/ogg", nil
 }
 
+// fakeHallucinatingPhraser always returns a fixed reply that states a
+// number that never appears in whatever PhraseInput it's given —
+// standing in for a model that ignores its input and invents a figure,
+// exactly the failure mode isGrounded exists to catch.
+type fakeHallucinatingPhraser struct {
+	reply string
+}
+
+func (f fakeHallucinatingPhraser) Phrase(_ context.Context, _ ai.PhraseInput) (string, error) {
+	return f.reply, nil
+}
+
 func newTestProcessor(pool *pgxpool.Pool, rdb *redis.Client, extractor ai.Extractor, phraser ai.Phraser, sender ai.Sender) *ai.Processor {
 	return ai.NewProcessor(ai.Config{
 		Extractor:   extractor,
@@ -164,6 +176,125 @@ func TestProcessor_LowConfidence_ConfirmThenExecute(t *testing.T) {
 	}
 	if phraser.last().Event != ai.EventDebtCreated {
 		t.Fatalf("got phrase event %v after confirmation, want EventDebtCreated", phraser.last().Event)
+	}
+}
+
+// TestProcessor_DebtCreated_OutstandingEqualsFullAmount is the
+// regression test for the reported bug: a freshly created debt has no
+// payments against it, so the outcome object handed to the phrasing
+// call must always report outstanding_minor equal to the full debt
+// amount — never zero, and never left unset (a prior bug did the
+// latter, which a Go zero-value int64 field then silently rendered as a
+// real ₦0 to the model).
+func TestProcessor_DebtCreated_OutstandingEqualsFullAmount(t *testing.T) {
+	pool := dbtest.Open(t)
+	rdb := dbtest.OpenRedis(t)
+	userID := dbtest.CreateUser(t, pool, "+2348050000013")
+
+	const wantAmountMinor = int64(7500000)
+	extractor := &fakeExtractor{results: []ai.RawIntent{
+		{Intent: ai.IntentCreateDebt, CustomerName: new("Chinedu"), AmountMinor: new(wantAmountMinor), Confidence: ai.ConfidenceHigh, Language: ai.LangEnglish},
+	}}
+	phraser := &fakePhraser{}
+	sender := &fakeSender{}
+	p := newTestProcessor(pool, rdb, extractor, phraser, sender)
+
+	msg := ai.ToInboundMessage(userID, "wamid.debtcreated.1", "text", new("Chinedu took 75k"))
+	if _, err := p.Handle(context.Background(), msg); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+
+	input := phraser.last()
+	if input.Event != ai.EventDebtCreated {
+		t.Fatalf("got phrase event %v, want EventDebtCreated", input.Event)
+	}
+	if input.AmountMinor == nil || *input.AmountMinor != wantAmountMinor {
+		t.Fatalf("got amount_minor %v, want %d", input.AmountMinor, wantAmountMinor)
+	}
+	if input.OutstandingMinor == nil {
+		t.Fatal("got a nil outstanding_minor for a freshly created debt, want it set to the full amount")
+	}
+	if *input.OutstandingMinor != wantAmountMinor {
+		t.Fatalf("got outstanding_minor %d, want %d (the full amount — nothing's been paid yet)", *input.OutstandingMinor, wantAmountMinor)
+	}
+}
+
+// TestProcessor_TwoNearIdenticalDebtMessages_SameOutstandingEachTime is
+// the second half of the bug report: two near-identical debt-creation
+// messages must produce a consistently-populated outcome object each
+// time — not "sometimes with the outstanding line, sometimes without."
+// That inconsistency traced back to the same root cause (the field
+// being left unset), so proving it's always set for repeated,
+// independent debts closes it.
+func TestProcessor_TwoNearIdenticalDebtMessages_SameOutstandingEachTime(t *testing.T) {
+	pool := dbtest.Open(t)
+	rdb := dbtest.OpenRedis(t)
+	userID := dbtest.CreateUser(t, pool, "+2348050000014")
+
+	extractor := &fakeExtractor{results: []ai.RawIntent{
+		{Intent: ai.IntentCreateDebt, CustomerName: new("Chinedu"), AmountMinor: new(int64(7500000)), Confidence: ai.ConfidenceHigh, Language: ai.LangEnglish},
+		{Intent: ai.IntentCreateDebt, CustomerName: new("Ngozi"), AmountMinor: new(int64(1200000)), Confidence: ai.ConfidenceHigh, Language: ai.LangEnglish},
+	}}
+	phraser := &fakePhraser{}
+	sender := &fakeSender{}
+	p := newTestProcessor(pool, rdb, extractor, phraser, sender)
+
+	if _, err := p.Handle(context.Background(), ai.ToInboundMessage(userID, "wamid.near1.1", "text", new("Chinedu took 75k"))); err != nil {
+		t.Fatalf("Handle (first debt): %v", err)
+	}
+	first := phraser.last()
+
+	if _, err := p.Handle(context.Background(), ai.ToInboundMessage(userID, "wamid.near1.2", "text", new("Ngozi took 12k"))); err != nil {
+		t.Fatalf("Handle (second debt): %v", err)
+	}
+	second := phraser.last()
+
+	for name, input := range map[string]ai.PhraseInput{"first": first, "second": second} {
+		if input.OutstandingMinor == nil {
+			t.Fatalf("%s message: got a nil outstanding_minor, want it set — every DEBT_CREATED outcome must be consistent", name)
+		}
+		if input.AmountMinor == nil || *input.OutstandingMinor != *input.AmountMinor {
+			t.Fatalf("%s message: got outstanding_minor %v vs amount_minor %v, want them equal for a brand-new debt", name, input.OutstandingMinor, input.AmountMinor)
+		}
+	}
+}
+
+// TestProcessor_HallucinatedPhrasing_FallsBackSafely proves the
+// structural half of the fix end to end: even when the Phraser itself
+// states a number that was never in its input (simulating a model that
+// ignores its instructions), Processor.phrase's isGrounded check catches
+// it and the trader never sees the hallucinated text — they get a safe,
+// success-confirming fallback instead (never one implying the debt
+// wasn't recorded, since it was).
+func TestProcessor_HallucinatedPhrasing_FallsBackSafely(t *testing.T) {
+	pool := dbtest.Open(t)
+	rdb := dbtest.OpenRedis(t)
+	userID := dbtest.CreateUser(t, pool, "+2348050000015")
+
+	extractor := &fakeExtractor{results: []ai.RawIntent{
+		{Intent: ai.IntentCreateDebt, CustomerName: new("Chinedu"), AmountMinor: new(int64(7500000)), Confidence: ai.ConfidenceHigh, Language: ai.LangEnglish},
+	}}
+	const hallucinated = "Debt recorded! Chinedu's outstanding balance: NGN 0."
+	phraser := fakeHallucinatingPhraser{reply: hallucinated}
+	sender := &fakeSender{}
+	p := newTestProcessor(pool, rdb, extractor, phraser, sender)
+
+	reply, err := p.Handle(context.Background(), ai.ToInboundMessage(userID, "wamid.hallucinate.1", "text", new("Chinedu took 75k")))
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+
+	if reply == hallucinated {
+		t.Fatal("got the hallucinated reply verbatim — isGrounded should have rejected it")
+	}
+	if strings.Contains(reply, "NGN 0") || strings.Contains(reply, "₦0") {
+		t.Fatalf("got a fallback reply that still states an incorrect ₦0, want no number at all: %q", reply)
+	}
+	if got := countRows(t, pool, `SELECT count(*) FROM debts WHERE user_id = $1`, userID); got != 1 {
+		t.Fatalf("got %d debts, want 1 — the mutation must still have succeeded even though phrasing was rejected", got)
+	}
+	if len(sender.sent) != 1 || sender.sent[0] != reply {
+		t.Fatalf("got sent messages %v, want exactly the safe fallback reply to have been sent", sender.sent)
 	}
 }
 
