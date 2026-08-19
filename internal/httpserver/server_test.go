@@ -49,7 +49,7 @@ func newTestEnv(t *testing.T) testEnv {
 		Customers:          customer.NewService(pool),
 		Debts:              debt.NewService(pool),
 		Payments:           payment.NewService(pool),
-		Webhooks:           whatsapp.NewService(pool, rdb, testWhatsAppSecret, testWhatsAppVerifyToken, logger),
+		Webhooks:           whatsapp.NewService(pool, rdb, testWhatsAppSecret, testWhatsAppVerifyToken, "test-access-token", "test-phone-number-id", logger),
 		RateLimitPerMinute: 1000, // high enough that handler tests don't trip it; rate limiting has its own tests
 		Logger:             logger,
 	}
