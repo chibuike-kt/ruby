@@ -20,8 +20,10 @@ import (
 
 const (
 	directionInbound  = "INBOUND"
+	directionOutbound = "OUTBOUND"
 	statusReceived    = "RECEIVED"
 	statusUnknownUser = "UNKNOWN_USER"
+	statusSent        = "SENT"
 
 	// dedupTTL matches the "a few minutes" guidance from
 	// docs/BRIEF-api-redis.md's original webhook dedup fast-path spec.
@@ -34,16 +36,74 @@ const (
 // failure worth a 500 (and worth letting Meta's retry recover from).
 var ErrMalformedPayload = errors.New("whatsapp: malformed webhook payload")
 
+// Handler is invoked, off the request path, once a message is durably
+// stored — the real counterpart to what handOff used to stub out. A nil
+// Handler (the default) leaves Service running receive/verify/dedupe/store
+// only, exactly as before this field existed.
+type Handler func(ctx context.Context, msg StoredMessage)
+
 type Service struct {
-	pool        *pgxpool.Pool
-	redis       *redis.Client
-	appSecret   string
-	verifyToken string
-	logger      *slog.Logger
+	pool          *pgxpool.Pool
+	redis         *redis.Client
+	appSecret     string
+	verifyToken   string
+	accessToken   string
+	phoneNumberID string
+	logger        *slog.Logger
+	handler       Handler
 }
 
-func NewService(pool *pgxpool.Pool, redisClient *redis.Client, appSecret, verifyToken string, logger *slog.Logger) *Service {
-	return &Service{pool: pool, redis: redisClient, appSecret: appSecret, verifyToken: verifyToken, logger: logger}
+func NewService(pool *pgxpool.Pool, redisClient *redis.Client, appSecret, verifyToken, accessToken, phoneNumberID string, logger *slog.Logger) *Service {
+	return &Service{
+		pool:          pool,
+		redis:         redisClient,
+		appSecret:     appSecret,
+		verifyToken:   verifyToken,
+		accessToken:   accessToken,
+		phoneNumberID: phoneNumberID,
+		logger:        logger,
+	}
+}
+
+// SetHandler wires the real message-processing pipeline in. It's a
+// setter rather than a constructor argument because the handler
+// typically needs a *Service back (to send the reply) — see
+// cmd/api/main.go for how the two are tied together without an import
+// cycle. Safe to call once, before the server starts accepting requests;
+// not safe to call concurrently with an in-flight ReceiveEvent.
+func (s *Service) SetHandler(h Handler) {
+	s.handler = h
+}
+
+// SendText sends a text reply and durably records it as an outbound
+// message (spec §39 audit trail), mirroring how an inbound message is
+// stored. The account lookup is best-effort: a failure to attribute the
+// row to a user_id doesn't stop the reply from being recorded.
+func (s *Service) SendText(ctx context.Context, to, body string) error {
+	id, err := sendText(ctx, s.accessToken, s.phoneNumberID, to, body)
+	if err != nil {
+		return err
+	}
+
+	var userID *int64
+	if a, acctErr := account.GetByPhoneNumber(ctx, s.pool, to); acctErr == nil {
+		userID = &a.ID
+	}
+
+	_, err = insertMessage(ctx, s.pool, StoredMessage{
+		UserID:            userID,
+		ProviderMessageID: id,
+		Direction:         directionOutbound,
+		MessageType:       "text",
+		ContentReference:  &body,
+		ProcessingStatus:  statusSent,
+	})
+	return err
+}
+
+// DownloadMedia fetches the bytes behind a WhatsApp media id (spec §22).
+func (s *Service) DownloadMedia(ctx context.Context, mediaID string) ([]byte, string, error) {
+	return downloadMedia(ctx, s.accessToken, mediaID)
 }
 
 // VerifySignature checks the POST body's X-Hub-Signature-256 header
@@ -150,7 +210,7 @@ func (s *Service) receiveMessage(ctx context.Context, msg Message) (Outcome, err
 	}
 
 	outcome.Stored = true
-	go s.handOff(stored)
+	go s.handOff(context.WithoutCancel(ctx), stored)
 
 	return outcome, nil
 }
@@ -181,12 +241,23 @@ func normalizePhone(from string) string {
 	return "+" + from
 }
 
-// handOff stands in for real intent extraction (a later slice).
-// Unlike the literal "logs 'would process: {content}'" phrasing this
-// slice's brief uses, this deliberately never logs the message body or
-// sender's number — spec §36 forbids exactly that, and being a stub
+// handOff dispatches a durably-stored message to the real processing
+// pipeline (internal/ai, wired in via SetHandler). A message from an
+// unrecognized sender (msg.UserID nil) has nothing to attribute AI
+// actions to, so it's left stored-but-unprocessed rather than handed
+// off. With no handler configured, this falls back to logging that a
+// message arrived — deliberately never the message body or sender's
+// number, since spec §36 forbids exactly that and being a fallback
 // doesn't exempt it.
-func (s *Service) handOff(msg StoredMessage) {
+func (s *Service) handOff(ctx context.Context, msg StoredMessage) {
+	if s.handler != nil {
+		if msg.UserID == nil {
+			return
+		}
+		s.handler(ctx, msg)
+		return
+	}
+
 	if s.logger == nil {
 		return
 	}

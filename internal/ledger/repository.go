@@ -2,6 +2,7 @@ package ledger
 
 import (
 	"context"
+	"sort"
 
 	"github.com/chibuike-kt/ruby/internal/db"
 )
@@ -29,6 +30,52 @@ func ListByUser(ctx context.Context, q db.Querier, userID int64) ([]Entry, error
 		FROM ledger_entries WHERE user_id = $1
 		ORDER BY id
 	`, userID)
+}
+
+// Summary is a per-currency rollup of a user's ledger (spec §17):
+// outstanding is always issued minus collected, never stored or computed
+// independently, so the three numbers can never drift apart.
+type Summary struct {
+	Currency               string
+	TotalCreditIssuedMinor int64
+	TotalCollectedMinor    int64
+	TotalOutstandingMinor  int64
+}
+
+// SummaryByUser groups every ledger entry for userID by currency. Every
+// debt creation and payment is already a signed ledger entry, so
+// outstanding = issued - collected holds without a per-debt loop.
+func SummaryByUser(ctx context.Context, q db.Querier, userID int64) ([]Summary, error) {
+	entries, err := ListByUser(ctx, q, userID)
+	if err != nil {
+		return nil, err
+	}
+
+	byCurrency := map[string]*Summary{}
+	var order []string
+	for _, e := range entries {
+		t := byCurrency[e.Currency]
+		if t == nil {
+			t = &Summary{Currency: e.Currency}
+			byCurrency[e.Currency] = t
+			order = append(order, e.Currency)
+		}
+		switch e.Type {
+		case EntryDebtCreated:
+			t.TotalCreditIssuedMinor += e.AmountMinor
+		case EntryPaymentRecorded:
+			t.TotalCollectedMinor += -e.AmountMinor
+		}
+	}
+
+	sort.Strings(order)
+	out := make([]Summary, 0, len(order))
+	for _, currency := range order {
+		t := byCurrency[currency]
+		t.TotalOutstandingMinor = t.TotalCreditIssuedMinor - t.TotalCollectedMinor
+		out = append(out, *t)
+	}
+	return out, nil
 }
 
 func list(ctx context.Context, q db.Querier, sql string, args ...any) ([]Entry, error) {
