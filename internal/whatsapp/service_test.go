@@ -113,7 +113,7 @@ func TestReceiveEvent_KnownSender_TextMessage(t *testing.T) {
 		t.Fatalf("got %d outcomes, want 1", len(outcomes))
 	}
 	o := outcomes[0]
-	if !o.Stored || o.Duplicate || o.UnknownSender {
+	if !o.Stored || o.Duplicate {
 		t.Fatalf("got outcome %+v, want a fresh stored message for a known sender", o)
 	}
 	if o.MessageType != "text" {
@@ -181,24 +181,80 @@ func TestReceiveEvent_PhoneNormalization_MissingPlus(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(outcomes) != 1 || outcomes[0].UnknownSender {
+	if len(outcomes) != 1 || !outcomes[0].Stored {
 		t.Fatalf("got outcomes %+v, want the sender resolved despite the missing '+' in the raw payload", outcomes)
 	}
 }
 
-func TestReceiveEvent_UnknownSender_StillStoresMessage(t *testing.T) {
-	svc := newTestService(t)
+// TestReceiveEvent_NewPhoneNumber_AutoCreatesUser is the required test
+// for docs/BRIEF-response-quality.md #1: a message from a phone number
+// with no matching users row must not get stuck unprocessable — Ruby
+// auto-creates the account (with an empty name; internal/ai's
+// name-capture flow fills it in) rather than requiring pre-registration.
+func TestReceiveEvent_NewPhoneNumber_AutoCreatesUser(t *testing.T) {
+	pool := dbtest.Open(t)
+	svc := whatsapp.NewService(pool, dbtest.OpenRedis(t), "test-secret", "test-verify-token", "test-access-token", "test-phone-number-id", slog.Default())
 
-	outcomes, err := svc.ReceiveEvent(context.Background(), textPayload("19995550000", "wamid.unknown1", "hello"))
+	outcomes, err := svc.ReceiveEvent(context.Background(), textPayload("19995550000", "wamid.newuser1", "Hi Ruby"))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(outcomes) != 1 {
-		t.Fatalf("got %d outcomes, want 1", len(outcomes))
+	if len(outcomes) != 1 || !outcomes[0].Stored {
+		t.Fatalf("got outcome %+v, want Stored=true — a new phone number must not get stuck unprocessable", outcomes)
 	}
-	o := outcomes[0]
-	if !o.UnknownSender || !o.Stored {
-		t.Fatalf("got outcome %+v, want UnknownSender=true and Stored=true", o)
+
+	var userID int64
+	var name, phone string
+	err = pool.QueryRow(context.Background(), `SELECT id, name, phone_number FROM users WHERE phone_number = $1`, "+19995550000").
+		Scan(&userID, &name, &phone)
+	if err != nil {
+		t.Fatalf("got no auto-created user row: %v", err)
+	}
+	if name != "" {
+		t.Fatalf("got name %q for a brand-new user, want empty (asked for, never guessed)", name)
+	}
+
+	var storedUserID int64
+	var status string
+	err = pool.QueryRow(context.Background(),
+		`SELECT user_id, processing_status FROM messages WHERE provider_message_id = $1`, "wamid.newuser1",
+	).Scan(&storedUserID, &status)
+	if err != nil {
+		t.Fatalf("query stored message: %v", err)
+	}
+	if storedUserID != userID {
+		t.Fatalf("got message user_id %d, want the auto-created user %d", storedUserID, userID)
+	}
+	if status != "RECEIVED" {
+		t.Fatalf("got processing_status %q, want RECEIVED — no more UNKNOWN_USER dead end", status)
+	}
+}
+
+// TestReceiveEvent_ExistingPhoneNumber_DoesNotCreateSecondUser proves
+// auto-creation only kicks in on genuinely new numbers.
+func TestReceiveEvent_ExistingPhoneNumber_DoesNotCreateSecondUser(t *testing.T) {
+	pool := dbtest.Open(t)
+	svc := whatsapp.NewService(pool, dbtest.OpenRedis(t), "test-secret", "test-verify-token", "test-access-token", "test-phone-number-id", slog.Default())
+	existingID := dbtest.CreateUser(t, pool, "+19995550001")
+
+	if _, err := svc.ReceiveEvent(context.Background(), textPayload("19995550001", "wamid.existing1", "hello")); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var count int
+	if err := pool.QueryRow(context.Background(), `SELECT count(*) FROM users WHERE phone_number = $1`, "+19995550001").Scan(&count); err != nil {
+		t.Fatalf("count users: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("got %d user rows for an existing phone number, want 1 (no duplicate created)", count)
+	}
+
+	var storedUserID int64
+	if err := pool.QueryRow(context.Background(), `SELECT user_id FROM messages WHERE provider_message_id = $1`, "wamid.existing1").Scan(&storedUserID); err != nil {
+		t.Fatalf("query stored message: %v", err)
+	}
+	if storedUserID != existingID {
+		t.Fatalf("got message user_id %d, want the existing user %d", storedUserID, existingID)
 	}
 }
 

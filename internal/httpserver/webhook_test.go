@@ -159,14 +159,19 @@ func TestWhatsAppWebhook_Post_MalformedPayload_ButValidSignature(t *testing.T) {
 	}
 }
 
-func TestWhatsAppWebhook_Post_UnknownSender_Returns200AndStores(t *testing.T) {
+// TestWhatsAppWebhook_Post_NewSender_Returns200AndAutoCreatesUser covers
+// docs/BRIEF-response-quality.md #1 through the HTTP layer: a message
+// from a phone number with no matching users row auto-creates one
+// (empty name — internal/ai's name-capture flow fills it in) rather
+// than being stuck at an UNKNOWN_USER dead end.
+func TestWhatsAppWebhook_Post_NewSender_Returns200AndAutoCreatesUser(t *testing.T) {
 	env := newTestEnv(t)
 
 	body := webhookTextPayload("16505559999", "wamid.http4")
 	rec := doWebhookPost(t, env, body, signBody(testWhatsAppSecret, body))
 
 	if rec.Code != http.StatusOK {
-		t.Fatalf("got status %d, want 200 even for an unknown sender, body=%s", rec.Code, rec.Body.String())
+		t.Fatalf("got status %d, want 200 for a new sender, body=%s", rec.Code, rec.Body.String())
 	}
 
 	var status string
@@ -177,11 +182,19 @@ func TestWhatsAppWebhook_Post_UnknownSender_Returns200AndStores(t *testing.T) {
 	if err != nil {
 		t.Fatalf("query stored message: %v", err)
 	}
-	if status != "UNKNOWN_USER" {
-		t.Fatalf("got processing_status %q, want UNKNOWN_USER", status)
+	if status != "RECEIVED" {
+		t.Fatalf("got processing_status %q, want RECEIVED", status)
 	}
-	if userID != nil {
-		t.Fatalf("got user_id %v, want nil for an unknown sender", *userID)
+	if userID == nil {
+		t.Fatal("got a nil user_id, want the auto-created user's id")
+	}
+
+	var name string
+	if err := env.pool.QueryRow(context.Background(), `SELECT name FROM users WHERE id = $1`, *userID).Scan(&name); err != nil {
+		t.Fatalf("query auto-created user: %v", err)
+	}
+	if name != "" {
+		t.Fatalf("got name %q for a brand-new user, want empty (asked for, never guessed)", name)
 	}
 }
 
