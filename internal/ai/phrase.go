@@ -20,7 +20,6 @@ const (
 	EventAmbiguousCustomer  PhraseEvent = "AMBIGUOUS_CUSTOMER"
 	EventCustomerBalance    PhraseEvent = "CUSTOMER_BALANCE"
 	EventCustomerList       PhraseEvent = "CUSTOMER_LIST"
-	EventOutstandingList    PhraseEvent = "OUTSTANDING_LIST"
 	EventTotalOutstanding   PhraseEvent = "TOTAL_OUTSTANDING"
 	EventPaymentSummary     PhraseEvent = "PAYMENT_SUMMARY"
 	EventCustomerNotFound   PhraseEvent = "CUSTOMER_NOT_FOUND"
@@ -62,12 +61,42 @@ type PhraseInput struct {
 // outcome don't need a model call, and reusing the phrasing call for
 // these would risk it drifting toward seeing raw trader text over time.
 // Kept deliberately short and simple to bound translation-quality risk.
+// helpText spells out concrete example phrasings for each of the four
+// things a trader can actually do (docs/BRIEF-response-quality.md #3) —
+// "phrased as examples of things to say, not a feature list" — with
+// WhatsApp formatting applied per #5 (bold labels, one capability per
+// line) so it reads as a scannable mini-menu, not a paragraph.
 var helpText = map[Language]string{
-	LangEnglish: "I can record a debt, record a payment, or tell you who owes you. Just tell me in plain language, e.g. \"Chinedu took 5k, pays Friday\" or \"Chinedu paid 5k\".",
-	LangPidgin:  "I fit record debt, record payment, or tell you who still owe you. Just talk am plain, like \"Chinedu carry 5k, e go pay Friday\" or \"Chinedu pay 5k\".",
-	LangYoruba:  "Mo le ṣe àkọsílẹ̀ gbèsè, ìsanwó, tàbí sọ ẹni tó jẹ ọ́ ní gbèsè. Sọ fún mi ní ìjìnlẹ̀ èdè, bí i \"Chinedu gba 5k, yóò san ní Friday\" tàbí \"Chinedu san 5k\".",
-	LangIgbo:    "Enwere m ike ịdekọ ụgwọ, ịdekọ ịkwụ ụgwọ, ma ọ bụ gwa gị onye ji gị ụgwọ. Naanị gwa m n'okwu efu, dịka \"Chinedu were 5k, ọ ga-akwụ na Friday\" ma ọ bụ \"Chinedu kwụrụ 5k\".",
-	LangHausa:   "Zan iya rikodin bashi, rikodin biya, ko in gaya maka wanda ke bin ka bashi. Ka gaya mini a sauƙaƙe, misali \"Chinedu ya dauka 5k, zai biya Jumma'a\" ko \"Chinedu ya biya 5k\".",
+	LangEnglish: "Here's what I can do:\n\n" +
+		"*Record a debt* — \"Chinedu took 5k, pays Friday\"\n" +
+		"*Record a payment* — \"Chinedu paid 5k\"\n" +
+		"*Check who owes you* — \"Who owes me?\"\n" +
+		"*Check one customer* — \"How much does Chinedu owe me?\"\n\n" +
+		"Just send a message like one of these, in your own words.",
+	LangPidgin: "Na dis I fit do:\n\n" +
+		"*Record debt* — \"Chinedu carry 5k, e go pay Friday\"\n" +
+		"*Record payment* — \"Chinedu pay 5k\"\n" +
+		"*Check who owe you* — \"Who owe me?\"\n" +
+		"*Check one customer* — \"How much Chinedu owe me?\"\n\n" +
+		"Just send message like one of dis, for your own way.",
+	LangYoruba: "Ìwọ̀nyí ni mo lè ṣe:\n\n" +
+		"*Ṣàkọsílẹ̀ gbèsè* — \"Chinedu gba 5k, yóò san ní Friday\"\n" +
+		"*Ṣàkọsílẹ̀ ìsanwó* — \"Chinedu san 5k\"\n" +
+		"*Ẹni tó jẹ ọ́ ní gbèsè* — \"Ta ló jẹ mí ní gbèsè?\"\n" +
+		"*Ọ̀kan pàtó* — \"Èló ni Chinedu jẹ mí?\"\n\n" +
+		"Fi ránṣẹ́ irú ọ̀kan nínú àwọn wọ̀nyí, ní ọ̀nà tìẹ.",
+	LangIgbo: "Ihe ndị a ka m nwere ike ime:\n\n" +
+		"*Dekọọ ụgwọ* — \"Chinedu were 5k, ọ ga-akwụ na Friday\"\n" +
+		"*Dekọọ ịkwụ ụgwọ* — \"Chinedu kwụrụ 5k\"\n" +
+		"*Onye ji gị ụgwọ* — \"Onye ji m ụgwọ?\"\n" +
+		"*Otu onye* — \"Ego ole Chinedu ji m?\"\n\n" +
+		"Naanị zipu ozi dịka otu n'ime ndị a, n'okwu gị.",
+	LangHausa: "Ga abin da zan iya yi:\n\n" +
+		"*Rikodin bashi* — \"Chinedu ya dauka 5k, zai biya Jumma'a\"\n" +
+		"*Rikodin biya* — \"Chinedu ya biya 5k\"\n" +
+		"*Duba wanda ke bin ka* — \"Wa ke bin ni bashi?\"\n" +
+		"*Duba wani abokin ciniki* — \"Nawa Chinedu ke bi na bashi?\"\n\n" +
+		"Kawai aika sako kamar ɗaya daga cikin waɗannan, a hanyar da ka fi so.",
 }
 
 var reminderUnsupportedText = map[Language]string{
@@ -112,6 +141,34 @@ var cancelledText = map[Language]string{
 	LangYoruba:  "Ó dára, ó ti fagilé — a kò ṣàkọsílẹ̀ ohunkóhun.",
 	LangIgbo:    "Ọ dị mma, ekagbuola ya — ọ dịghị ihe edekọrọ.",
 	LangHausa:   "To, an soke — ba a rubuta komai ba.",
+}
+
+// noOutstandingDebtsText, dueLabelText, and totalOutstandingLabelText
+// back the deterministic LIST_OUTSTANDING_DEBTS formatting in format.go
+// (docs/BRIEF-response-quality.md #4) — fixed strings, not a Phraser
+// call, same reasoning as helpText et al.
+var noOutstandingDebtsText = map[Language]string{
+	LangEnglish: "You're all clear — no one owes you right now.",
+	LangPidgin:  "You clear — nobody owe you now.",
+	LangYoruba:  "O ti yege — kò sí ẹnikẹ́ni tó jẹ ọ́ ní gbèsè báyìí.",
+	LangIgbo:    "Ọ dị gị mma — ọ dịghị onye ji gị ụgwọ ugbu a.",
+	LangHausa:   "Kana da lafiya — babu wanda ke bin ka bashi a yanzu.",
+}
+
+var dueLabelText = map[Language]string{
+	LangEnglish: "due",
+	LangPidgin:  "e go pay",
+	LangYoruba:  "yóò san ní",
+	LangIgbo:    "kwụọ na",
+	LangHausa:   "biya a",
+}
+
+var totalOutstandingLabelText = map[Language]string{
+	LangEnglish: "Total outstanding:",
+	LangPidgin:  "Total wey remain:",
+	LangYoruba:  "Àpapọ̀ tó ṣẹ́kù:",
+	LangIgbo:    "Mkpokọta fọdụrụ:",
+	LangHausa:   "Jimillar da ta rage:",
 }
 
 // genericErrorText is spec §37's "never respond with an unexplained
