@@ -15,7 +15,7 @@ func newTestService(t *testing.T) *whatsapp.Service {
 	t.Helper()
 	pool := dbtest.Open(t)
 	rdb := dbtest.OpenRedis(t)
-	return whatsapp.NewService(pool, rdb, "test-secret", "test-verify-token", slog.Default())
+	return whatsapp.NewService(pool, rdb, "test-secret", "test-verify-token", "test-access-token", "test-phone-number-id", slog.Default())
 }
 
 func textPayload(from, id, body string) []byte {
@@ -81,7 +81,7 @@ func TestVerifyHandshake_WrongMode(t *testing.T) {
 func TestReceiveEvent_KnownSender_TextMessage(t *testing.T) {
 	pool := dbtest.Open(t)
 	rdb := dbtest.OpenRedis(t)
-	svc := whatsapp.NewService(pool, rdb, "test-secret", "test-verify-token", slog.Default())
+	svc := whatsapp.NewService(pool, rdb, "test-secret", "test-verify-token", "test-access-token", "test-phone-number-id", slog.Default())
 	userID := dbtest.CreateUser(t, pool, "+16505551234")
 
 	outcomes, err := svc.ReceiveEvent(context.Background(), textPayload("16505551234", "wamid.text1", "Chinedu took 2 cartons of noodles for 75k"))
@@ -121,7 +121,7 @@ func TestReceiveEvent_KnownSender_TextMessage(t *testing.T) {
 func TestReceiveEvent_KnownSender_AudioMessage_StoresMediaID(t *testing.T) {
 	pool := dbtest.Open(t)
 	rdb := dbtest.OpenRedis(t)
-	svc := whatsapp.NewService(pool, rdb, "test-secret", "test-verify-token", slog.Default())
+	svc := whatsapp.NewService(pool, rdb, "test-secret", "test-verify-token", "test-access-token", "test-phone-number-id", slog.Default())
 	dbtest.CreateUser(t, pool, "+16505551235")
 
 	outcomes, err := svc.ReceiveEvent(context.Background(), audioPayload("16505551235", "wamid.audio1", "media-abc-123"))
@@ -150,7 +150,7 @@ func TestReceiveEvent_KnownSender_AudioMessage_StoresMediaID(t *testing.T) {
 func TestReceiveEvent_PhoneNormalization_MissingPlus(t *testing.T) {
 	pool := dbtest.Open(t)
 	rdb := dbtest.OpenRedis(t)
-	svc := whatsapp.NewService(pool, rdb, "test-secret", "test-verify-token", slog.Default())
+	svc := whatsapp.NewService(pool, rdb, "test-secret", "test-verify-token", "test-access-token", "test-phone-number-id", slog.Default())
 	// Stored the way every other fixture in this codebase stores it —
 	// E.164 with a leading "+" — while WhatsApp's "from" field never
 	// includes one.
@@ -184,7 +184,7 @@ func TestReceiveEvent_UnknownSender_StillStoresMessage(t *testing.T) {
 func TestReceiveEvent_Duplicate_SecondCallDoesNotCreateSecondRow(t *testing.T) {
 	pool := dbtest.Open(t)
 	rdb := dbtest.OpenRedis(t)
-	svc := whatsapp.NewService(pool, rdb, "test-secret", "test-verify-token", slog.Default())
+	svc := whatsapp.NewService(pool, rdb, "test-secret", "test-verify-token", "test-access-token", "test-phone-number-id", slog.Default())
 	dbtest.CreateUser(t, pool, "+16505551236")
 
 	payload := textPayload("16505551236", "wamid.dup1", "hello")
@@ -226,7 +226,7 @@ func TestReceiveEvent_Duplicate_SecondCallDoesNotCreateSecondRow(t *testing.T) {
 func TestReceiveEvent_ConcurrentDuplicate_PostgresStillCatchesIt(t *testing.T) {
 	pool := dbtest.Open(t)
 	rdb := dbtest.OpenRedis(t)
-	svc := whatsapp.NewService(pool, rdb, "test-secret", "test-verify-token", slog.Default())
+	svc := whatsapp.NewService(pool, rdb, "test-secret", "test-verify-token", "test-access-token", "test-phone-number-id", slog.Default())
 	dbtest.CreateUser(t, pool, "+16505551237")
 
 	payload := textPayload("16505551237", "wamid.race1", "hello")
@@ -312,7 +312,7 @@ func TestReceiveEvent_NoMessagesInPayload_NoOutcomesNoError(t *testing.T) {
 func TestReceiveEvent_UnsupportedMessageType_StoredWithoutContentReference(t *testing.T) {
 	pool := dbtest.Open(t)
 	rdb := dbtest.OpenRedis(t)
-	svc := whatsapp.NewService(pool, rdb, "test-secret", "test-verify-token", slog.Default())
+	svc := whatsapp.NewService(pool, rdb, "test-secret", "test-verify-token", "test-access-token", "test-phone-number-id", slog.Default())
 	dbtest.CreateUser(t, pool, "+16505551238")
 
 	body := []byte(`{
