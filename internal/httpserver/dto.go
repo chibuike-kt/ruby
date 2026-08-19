@@ -133,3 +133,12 @@ type summaryTotals struct {
 	TotalCollectedMinor    int64  `json:"total_collected_minor"`
 	TotalOutstandingMinor  int64  `json:"total_outstanding_minor"`
 }
+
+func toSummaryTotals(t ledger.Summary) summaryTotals {
+	return summaryTotals{
+		Currency:               t.Currency,
+		TotalCreditIssuedMinor: t.TotalCreditIssuedMinor,
+		TotalCollectedMinor:    t.TotalCollectedMinor,
+		TotalOutstandingMinor:  t.TotalOutstandingMinor,
+	}
+}
