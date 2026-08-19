@@ -20,6 +20,7 @@ import (
 	"github.com/chibuike-kt/ruby/internal/httpserver/httpjson"
 	"github.com/chibuike-kt/ruby/internal/httpserver/middleware"
 	"github.com/chibuike-kt/ruby/internal/payment"
+	"github.com/chibuike-kt/ruby/internal/whatsapp"
 )
 
 const rateLimitWindow = time.Minute
@@ -30,6 +31,7 @@ type Server struct {
 	Customers          *customer.Service
 	Debts              *debt.Service
 	Payments           *payment.Service
+	Webhooks           *whatsapp.Service
 	RateLimitPerMinute int
 	Logger             *slog.Logger
 }
@@ -43,6 +45,15 @@ func NewRouter(s *Server) http.Handler {
 	// registered before TempAuth is added to the chain, not inside the
 	// /api group below.
 	r.Get("/healthz", healthz)
+
+	// Meta's webhook authenticates itself (HMAC signature on POST,
+	// shared verify token on the GET handshake) — a completely
+	// different scheme from the trader-facing X-User-ID auth, so this
+	// also stays outside the TempAuth-protected /api group below.
+	r.Route("/api/webhooks", func(r chi.Router) {
+		r.Get("/whatsapp", s.verifyWhatsAppWebhook)
+		r.Post("/whatsapp", s.receiveWhatsAppWebhook)
+	})
 
 	rateLimited := middleware.RateLimit(s.Redis, s.RateLimitPerMinute, rateLimitWindow)
 
