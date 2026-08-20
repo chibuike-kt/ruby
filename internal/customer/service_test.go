@@ -107,6 +107,28 @@ func TestCreate_DuplicateName_WithAlias_Allowed(t *testing.T) {
 	}
 }
 
+// TestCreate_DuplicateName_CaseInsensitive_Rejected is docs/BRIEF-
+// disambiguation-reminders-statements.md Tier 1a's regression test —
+// the actual transcript: a second "Emmanuel" (crocs, 50k) got created
+// with no alias/phone alongside an existing "Emmanuel" (pure water,
+// 300) because the guard's own lookup was case-sensitive and the two
+// mentions weren't typed with identical capitalization.
+func TestCreate_DuplicateName_CaseInsensitive_Rejected(t *testing.T) {
+	pool := dbtest.Open(t)
+	userID := dbtest.CreateUser(t, pool, "+2348010000019")
+	svc := customer.NewService(pool)
+	ctx := context.Background()
+
+	if _, err := svc.Create(ctx, userID, "Emmanuel", nil, nil); err != nil {
+		t.Fatalf("first create: unexpected error: %v", err)
+	}
+
+	_, err := svc.Create(ctx, userID, "emmanuel", nil, nil)
+	if !errors.Is(err, customer.ErrDuplicateNameRequiresSignal) {
+		t.Fatalf("got %v, want ErrDuplicateNameRequiresSignal for \"emmanuel\" against an existing \"Emmanuel\"", err)
+	}
+}
+
 func TestCreate_DuplicateName_ScopedPerUser(t *testing.T) {
 	pool := dbtest.Open(t)
 	userA := dbtest.CreateUser(t, pool, "+2348010000016")
@@ -271,6 +293,31 @@ func TestResolve_ByName_SingleMatch(t *testing.T) {
 	got, err := svc.Resolve(ctx, userID, customer.Ref{Name: strPtr("Musa")})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+	if got.ID != c.ID {
+		t.Fatalf("got id %d, want %d", got.ID, c.ID)
+	}
+}
+
+// TestResolve_ByName_CaseInsensitive_Matches is the other half of Tier
+// 1a/1b's root cause: a bare-name reference must match an existing
+// customer regardless of capitalization, the same requirement
+// TestCreate_DuplicateName_CaseInsensitive_Rejected exercises at
+// creation time.
+func TestResolve_ByName_CaseInsensitive_Matches(t *testing.T) {
+	pool := dbtest.Open(t)
+	userID := dbtest.CreateUser(t, pool, "+2348010000020")
+	svc := customer.NewService(pool)
+	ctx := context.Background()
+
+	c, err := svc.Create(ctx, userID, "Emmanuel", nil, nil)
+	if err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	got, err := svc.Resolve(ctx, userID, customer.Ref{Name: strPtr("emmanuel")})
+	if err != nil {
+		t.Fatalf("unexpected error resolving \"emmanuel\" against stored \"Emmanuel\": %v", err)
 	}
 	if got.ID != c.ID {
 		t.Fatalf("got id %d, want %d", got.ID, c.ID)

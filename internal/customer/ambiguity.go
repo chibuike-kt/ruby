@@ -13,39 +13,62 @@ type CandidateHint struct {
 // when they added someone; time-of-day would just be noise.
 const hintDateFormat = "2 Jan 2006"
 
-// Hints builds a distinguishing label per candidate (decisions.md #8):
+// Hints builds a distinguishing label per candidate (decisions.md #8,
+// extended by docs/BRIEF-disambiguation-reminders-statements.md Tier
+// 1c): never force the trader to recall their own past alias choice —
+// show real distinguishing detail outright, in descending order of how
+// reliably it actually identifies the person:
 //
-//  1. If the descriptions supplied for these candidates aren't all
-//     identical, use each candidate's own description — a real signal
+//  1. The candidate's own alias, if one was set at creation — the
+//     strongest signal, since a trader who bothered to set one
+//     specifically meant to tell same-named customers apart.
+//  2. The candidate's own phone number, if one is on file.
+//  3. If the descriptions supplied for these candidates aren't all
+//     identical, each candidate's own description — a real signal
 //     ("2 cartons of noodles" vs "1 bag of rice"). Debt amount and due
 //     date are never used this way: two debts matching on amount and
 //     date is coincidence, not identity, and treating it as a signal
 //     is exactly the kind of guess spec §11 forbids.
-//  2. Otherwise fall back to creation order, phrased for a human
+//  4. Otherwise fall back to creation order, phrased for a human
 //     rather than a raw customer_id. id and created_at exist
 //     unconditionally on every row and always differ between two
 //     distinct rows, so this never runs out of distinguishing power —
-//     even when name, amount, due date, and description are all
-//     identical.
+//     even when name, alias, phone, amount, due date, and description
+//     are all identical.
 //
-// descriptions is keyed by customer id. internal/customer has no debt
-// data of its own — internal/debt already imports customer for
-// ownership checks, so the reverse import would cycle — so whichever
-// layer holds both customer and debt context supplies descriptions
-// here rather than this package fetching them itself. A nil or
-// incomplete map just means every candidate falls back to case 2.
+// descriptions is keyed by customer id, one entry per candidate — the
+// most recent outstanding transaction's item description, per Tier 1c
+// ("the most recent transaction's item description"). internal/customer
+// has no debt data of its own — internal/debt already imports customer
+// for ownership checks, so the reverse import would cycle — so
+// whichever layer holds both customer and debt context supplies
+// descriptions here rather than this package fetching them itself. A
+// nil or incomplete map just means that candidate falls through to a
+// later step in the hierarchy.
 func (e *AmbiguousError) Hints(descriptions map[int64]string) []CandidateHint {
 	distinguishing := len(distinctValues(e.Candidates, descriptions)) > 1
 
 	hints := make([]CandidateHint, len(e.Candidates))
 	for i, c := range e.Candidates {
-		hint := descriptions[c.ID]
-		if !distinguishing {
-			hint = "added " + c.CreatedAt.Format(hintDateFormat)
-		}
-		hints[i] = CandidateHint{Customer: c, Hint: hint}
+		hints[i] = CandidateHint{Customer: c, Hint: hintFor(c, descriptions[c.ID], distinguishing)}
 	}
 	return hints
+}
+
+func hintFor(c Customer, description string, descriptionDistinguishes bool) string {
+	if alias := trimmed(c.Alias); alias != "" {
+		return alias
+	}
+	if phone := trimmed(c.PhoneNumber); phone != "" {
+		return phone
+	}
+	if descriptionDistinguishes {
+		// description itself may be "" for this specific candidate —
+		// that's still a real contrast against a sibling that has one,
+		// not a tie, so it's used as-is rather than falling further.
+		return description
+	}
+	return "added " + c.CreatedAt.Format(hintDateFormat)
 }
 
 func distinctValues(candidates []Customer, descriptions map[int64]string) map[string]bool {

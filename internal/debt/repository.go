@@ -52,6 +52,33 @@ func GetForUpdate(ctx context.Context, tx db.Querier, userID, id int64) (Debt, e
 	return d, err
 }
 
+// ListByCustomer returns every debt for a customer — any status,
+// oldest first — for docs/BRIEF-disambiguation-reminders-
+// statements.md Tier 3's GET_CUSTOMER_STATEMENT: a real account
+// history, not just what's currently outstanding (that's already
+// ListOutstandingByUser's job).
+func ListByCustomer(ctx context.Context, q db.Querier, userID, customerID int64) ([]Debt, error) {
+	rows, err := q.Query(ctx, `
+		SELECT id, user_id, customer_id, amount_minor, currency, description, due_date, status, created_at, updated_at
+		FROM debts WHERE user_id = $1 AND customer_id = $2
+		ORDER BY id
+	`, userID, customerID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []Debt
+	for rows.Next() {
+		d, err := scan(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, d)
+	}
+	return out, rows.Err()
+}
+
 func UpdateStatus(ctx context.Context, tx db.Querier, id int64, status Status) error {
 	_, err := tx.Exec(ctx, `UPDATE debts SET status = $1, updated_at = now() WHERE id = $2`, string(status), id)
 	return err
