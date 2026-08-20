@@ -28,7 +28,12 @@ func TestProcessor_Unsupported_HonestDecline(t *testing.T) {
 	sender := &fakeSender{}
 	p := newTestProcessor(pool, rdb, extractor, phraser, sender)
 
-	reply, err := p.Handle(context.Background(), ai.ToInboundMessage(userID, "wamid.unsupported.1", "text", new("send Chinedu an invoice for 2 bags of rice")))
+	// "generate a PDF report", not "send an invoice for Chinedu" —
+	// docs/BRIEF-disambiguation-reminders-statements.md Tier 3 made a
+	// per-customer statement/invoice a real, supported feature
+	// (GET_CUSTOMER_STATEMENT); a downloadable file/report across all
+	// customers is what's still genuinely unsupported.
+	reply, err := p.Handle(context.Background(), ai.ToInboundMessage(userID, "wamid.unsupported.1", "text", new("generate a PDF report of all my sales this month")))
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
@@ -61,8 +66,14 @@ func TestProcessor_Unsupported_HonestDecline(t *testing.T) {
 }
 
 // TestProcessor_Unsupported_DistinctFromReminderIntents confirms
-// CREATE_REMINDER/CANCEL_REMINDER keep their own dedicated response —
-// 1c's fix must not collapse that distinction.
+// CREATE_REMINDER keeps its own dedicated handling, never collapsed
+// into UNSUPPORTED's decline — docs/BRIEF-disambiguation-reminders-
+// statements.md Tier 2a made CREATE_REMINDER a real, standalone
+// feature (it used to reply "reminders aren't available yet" always;
+// that placeholder is gone), so a message missing its required fields
+// now goes through the same interactive slot-filling every other
+// mutating intent gets, asking for what's missing rather than
+// declining.
 func TestProcessor_Unsupported_DistinctFromReminderIntents(t *testing.T) {
 	pool := dbtest.Open(t)
 	rdb := dbtest.OpenRedis(t)
@@ -79,7 +90,10 @@ func TestProcessor_Unsupported_DistinctFromReminderIntents(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
-	if !strings.Contains(reply.Text, "noted your request") {
-		t.Fatalf("got reply %q, want the reminder-specific text (unchanged)", reply.Text)
+	if strings.Contains(reply.Text, "can't do that yet") || strings.Contains(reply.Text, "noted your request") {
+		t.Fatalf("got reply %q, want CREATE_REMINDER handled as a real feature, not declined or stubbed", reply.Text)
+	}
+	if !strings.Contains(strings.ToLower(reply.Text), "who") {
+		t.Fatalf("got reply %q, want the slot-fill customer question (no customer name was given)", reply.Text)
 	}
 }

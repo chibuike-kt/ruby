@@ -277,6 +277,68 @@ var slotFillAmountReaskText = map[Language]string{
 	LangHausa:   "Ina bukatan adadin kudi ne kawai — nawa ne?",
 }
 
+// slotFillDateText/slotFillDateWithNameText and slotFillDateReaskText
+// are docs/BRIEF-disambiguation-reminders-statements.md Tier 2b's own
+// slot-filling question — CREATE_REMINDER's date, asked the same
+// deterministic way every other slot-fill question is, independent of
+// whether the underlying debt has a due date on record.
+var slotFillDateText = map[Language]string{
+	LangEnglish: "When should I remind you?",
+	LangPidgin:  "When you want make I remind you?",
+	LangYoruba:  "Ìgbà wo ni kí n rán ọ létí?",
+	LangIgbo:    "Kedu mgbe m ga-echeta gị?",
+	LangHausa:   "Yaushe zan tunatar da kai?",
+}
+
+var slotFillDateWithNameText = map[Language]string{
+	LangEnglish: "When should I remind you about *%s*?",
+	LangPidgin:  "When you want make I remind you about *%s*?",
+	LangYoruba:  "Ìgbà wo ni kí n rán ọ létí nípa *%s*?",
+	LangIgbo:    "Kedu mgbe m ga-echeta gị maka *%s*?",
+	LangHausa:   "Yaushe zan tunatar da kai game da *%s*?",
+}
+
+var slotFillDateReaskText = map[Language]string{
+	LangEnglish: "I just need a date — when should I remind you?",
+	LangPidgin:  "I just need a date — when you want make I remind you?",
+	LangYoruba:  "Mo kàn nílò ọjọ́ kan — ìgbà wo ni kí n rán ọ létí?",
+	LangIgbo:    "Naanị achọrọ m ụbọchị — kedu mgbe m ga-echeta gị?",
+	LangHausa:   "Ina bukatan kwanan wata kawai — yaushe zan tunatar da kai?",
+}
+
+// standaloneReminderScheduledText confirms docs/BRIEF-disambiguation-
+// reminders-statements.md Tier 2a/2b's standalone CREATE_REMINDER —
+// distinct from reminderScheduledText (which confirms reminding the
+// *customer*, the creation-time opt-in flow): this is Ruby confirming
+// it will remind the *trader themselves*, about a specific customer,
+// on the date they asked for. %[1]s is the customer name, %[2]s the
+// date.
+var standaloneReminderScheduledText = map[Language]string{
+	LangEnglish: "Got it — I'll remind you about *%[1]s* the day before, and again on %[2]s.",
+	LangPidgin:  "Okay — I go remind you about *%[1]s* the day before, and again on %[2]s.",
+	LangYoruba:  "Ó dára — màá rán ọ létí nípa *%[1]s* ní ọjọ́ kan ṣáájú, àti lẹ́ẹ̀kan sí i ní %[2]s.",
+	LangIgbo:    "Ọ dị mma — m ga-echeta gị maka *%[1]s* otu ụbọchị tupu, na ọzọ na %[2]s.",
+	LangHausa:   "Na gane — zan tunatar da kai game da *%[1]s* rana guda kafin, kuma a %[2]s.",
+}
+
+// reminderCancelledText and noReminderScheduledText answer Tier 2c's
+// CANCEL_REMINDER intent — %s is the customer name.
+var reminderCancelledText = map[Language]string{
+	LangEnglish: "Done — I've cancelled the reminder about *%s*.",
+	LangPidgin:  "Done — I don cancel the reminder about *%s*.",
+	LangYoruba:  "Ti ṣe — mo ti fagilé ìránnilétí nípa *%s*.",
+	LangIgbo:    "Emeela — akagbuola m ncheta banyere *%s*.",
+	LangHausa:   "An yi — na soke tunatarwar game da *%s*.",
+}
+
+var noReminderScheduledText = map[Language]string{
+	LangEnglish: "There's no reminder scheduled about *%s* right now.",
+	LangPidgin:  "No reminder dey scheduled about *%s* now.",
+	LangYoruba:  "Kò sí ìránnilétí kankan tí a ṣètò nípa *%s* ní báyìí.",
+	LangIgbo:    "Ọ dịghị ncheta ọbụla ahazila banyere *%s* ugbu a.",
+	LangHausa:   "Babu wata tunatarwa da aka tsara game da *%s* a yanzu.",
+}
+
 // noOutstandingDebtsText, dueLabelText, and totalOutstandingLabelText
 // back the deterministic LIST_OUTSTANDING_DEBTS formatting in format.go
 // (docs/BRIEF-response-quality.md #4) — fixed strings, not a Phraser
@@ -324,6 +386,64 @@ var customerListHeaderText = map[Language]string{
 	LangYoruba:  "Àwọn oníbàárà rẹ:",
 	LangIgbo:    "Ndị ahịa gị:",
 	LangHausa:   "Abokan cinikinka:",
+}
+
+// statementHeaderText, statementNoDescriptionText,
+// statementNoPaymentsText, statementPaidLabelText, and
+// statementOutstandingLabelText back the deterministic
+// GET_CUSTOMER_STATEMENT formatting in format.go
+// (docs/BRIEF-disambiguation-reminders-statements.md Tier 3) — fixed
+// strings, not a Phraser call, same reasoning as every other
+// deterministic list in this file. %s is the customer name.
+var statementHeaderText = map[Language]string{
+	LangEnglish: "*%s's account*",
+	LangPidgin:  "*%s's account*",
+	LangYoruba:  "*Àkọsílẹ̀ %s*",
+	LangIgbo:    "*Akaụntụ %s*",
+	LangHausa:   "*Asusun %s*",
+}
+
+var statementNoDescriptionText = map[Language]string{
+	LangEnglish: "item",
+	LangPidgin:  "item",
+	LangYoruba:  "ọjà",
+	LangIgbo:    "ihe",
+	LangHausa:   "kaya",
+}
+
+var statementNoPaymentsText = map[Language]string{
+	LangEnglish: "No payments yet",
+	LangPidgin:  "No payment yet",
+	LangYoruba:  "Kò sí ìsanwó kankan síbẹ̀",
+	LangIgbo:    "Enwebeghị ịkwụ ụgwọ ọbụla",
+	LangHausa:   "Babu biyan da aka yi tukuna",
+}
+
+var statementPaidLabelText = map[Language]string{
+	LangEnglish: "Paid",
+	LangPidgin:  "Pay",
+	LangYoruba:  "San",
+	LangIgbo:    "Akwụọla",
+	LangHausa:   "An biya",
+}
+
+var statementOutstandingLabelText = map[Language]string{
+	LangEnglish: "Outstanding:",
+	LangPidgin:  "Wetin remain:",
+	LangYoruba:  "Tó ṣẹ́kù:",
+	LangIgbo:    "Fọdụrụnụ:",
+	LangHausa:   "Ragowar:",
+}
+
+// noStatementHistoryText is the genuine empty state — a customer with
+// no debts on record at all, same reasoning as noCustomersText/
+// noOutstandingDebtsText.
+var noStatementHistoryText = map[Language]string{
+	LangEnglish: "*%s* has no debts on record yet.",
+	LangPidgin:  "*%s* never get any debt for record yet.",
+	LangYoruba:  "*%s* kò tíì ní gbèsè kankan lórí àkọsílẹ̀.",
+	LangIgbo:    "*%s* enwebeghị ụgwọ ọbụla edekọrọ.",
+	LangHausa:   "*%s* ba shi da wani bashi da aka rubuta tukuna.",
 }
 
 // genericErrorText is spec §37's "never respond with an unexplained

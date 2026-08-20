@@ -51,18 +51,31 @@ func FindByPhone(ctx context.Context, q db.Querier, userID int64, phone string) 
 	`, userID, phone)
 }
 
+// FindByAlias matches case-insensitively — same reasoning as
+// FindByName below: a human-typed name/alias is never guaranteed
+// identical casing across two different messages.
 func FindByAlias(ctx context.Context, q db.Querier, userID int64, alias string) ([]Customer, error) {
 	return list(ctx, q, `
 		SELECT id, user_id, name, phone_number, alias, created_at, updated_at
-		FROM customers WHERE user_id = $1 AND alias = $2
+		FROM customers WHERE user_id = $1 AND lower(alias) = lower($2)
 		ORDER BY id
 	`, userID, alias)
 }
 
+// FindByName matches case-insensitively (docs/BRIEF-disambiguation-
+// reminders-statements.md Tier 1's root cause): the original exact,
+// case-sensitive `name = $2` meant "Emmanuel" and "emmanuel" — two
+// spellings of the exact same trader-typed name that the AI extractor
+// has no guaranteed-consistent capitalization for across separate
+// messages (voice transcription and casual typing both vary it) —
+// were invisible to each other everywhere this lookup is used:
+// CreateChecked's duplicate-name guard (decisions.md #8), Validator's
+// same/new identity-confirmation check and disambiguation (decisions.md
+// #9), all silently missed each other's row instead of firing.
 func FindByName(ctx context.Context, q db.Querier, userID int64, name string) ([]Customer, error) {
 	return list(ctx, q, `
 		SELECT id, user_id, name, phone_number, alias, created_at, updated_at
-		FROM customers WHERE user_id = $1 AND name = $2
+		FROM customers WHERE user_id = $1 AND lower(name) = lower($2)
 		ORDER BY id
 	`, userID, name)
 }

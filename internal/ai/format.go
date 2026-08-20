@@ -44,6 +44,52 @@ func formatOutstandingDebtsList(lines []outstandingDebtLine, totalMinor int64, l
 	return b.String()
 }
 
+// statementPaymentLine is one payment shown under its debt in a
+// GET_CUSTOMER_STATEMENT reply.
+type statementPaymentLine struct {
+	amountMinor int64
+	date        time.Time
+}
+
+// statementDebtLine is one debt (any status, unlike
+// outstandingDebtLine) in a customer statement.
+type statementDebtLine struct {
+	description string
+	amountMinor int64
+	date        time.Time
+	payments    []statementPaymentLine
+}
+
+// formatCustomerStatement builds docs/BRIEF-disambiguation-reminders-
+// statements.md Tier 3's GET_CUSTOMER_STATEMENT reply deterministically
+// — every debt with its item description and date, every payment
+// against each, and the current outstanding balance — same reasoning
+// as formatOutstandingDebtsList: entirely in Go, so nothing here can
+// violate the isGrounded backstop.
+func formatCustomerStatement(customerName string, lines []statementDebtLine, outstandingMinor int64, lang Language) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s\n\n", fmt.Sprintf(fixedText(statementHeaderText, lang), customerName))
+	for i, l := range lines {
+		if i > 0 {
+			b.WriteString("\n\n")
+		}
+		desc := l.description
+		if desc == "" {
+			desc = fixedText(statementNoDescriptionText, lang)
+		}
+		fmt.Fprintf(&b, "*%s* — %s (%s)", desc, money.FormatNaira(l.amountMinor), l.date.Format(dueDateDisplayFormat))
+		if len(l.payments) == 0 {
+			fmt.Fprintf(&b, "\n%s", fixedText(statementNoPaymentsText, lang))
+			continue
+		}
+		for _, p := range l.payments {
+			fmt.Fprintf(&b, "\n%s %s (%s)", fixedText(statementPaidLabelText, lang), money.FormatNaira(p.amountMinor), p.date.Format(dueDateDisplayFormat))
+		}
+	}
+	fmt.Fprintf(&b, "\n\n%s *%s*", fixedText(statementOutstandingLabelText, lang), money.FormatNaira(outstandingMinor))
+	return b.String()
+}
+
 // formatCustomerList builds LIST_CUSTOMERS' reply deterministically
 // (docs/BRIEF-critical-fixes-and-reminders.md #2a) — the same reasoning
 // as formatOutstandingDebtsList: a list of real names is exactly the

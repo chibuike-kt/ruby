@@ -87,3 +87,9 @@ func (s *Service) Get(ctx context.Context, userID, id int64) (Debt, error) {
 func (s *Service) ListOutstanding(ctx context.Context, userID int64) ([]Debt, error) {
 	return ListOutstandingByUser(ctx, s.pool, userID)
 }
+
+// ListByCustomer returns a customer's full debt history (any status)
+// — docs/BRIEF-disambiguation-reminders-statements.md Tier 3.
+func (s *Service) ListByCustomer(ctx context.Context, userID, customerID int64) ([]Debt, error) {
+	return ListByCustomer(ctx, s.pool, userID, customerID)
+}

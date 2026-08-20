@@ -14,16 +14,29 @@ type SlotField string
 const (
 	SlotCustomer SlotField = "customer"
 	SlotAmount   SlotField = "amount"
+	// SlotDate is docs/BRIEF-disambiguation-reminders-statements.md
+	// Tier 2b's addition: CREATE_REMINDER needs a date to schedule
+	// against, independent of whether the underlying debt has a due
+	// date on record — "if the reminder request itself doesn't include
+	// a date either, ask for one at that point rather than declining
+	// outright."
+	SlotDate SlotField = "date"
 )
 
 // requiredSlotFields is the source of truth for what's required per
-// intent — due date and description are deliberately absent: they're
-// optional, and 1a is explicit that Ruby must never ask for them.
-// Order matters: identity before amount (edge case #1).
+// intent. For CREATE_DEBT/RECORD_PAYMENT, due date and description are
+// deliberately absent: they're optional, and 1a is explicit that Ruby
+// must never ask for them. Order matters: identity before amount (edge
+// case #1) — the same "ask the identity question first" ordering
+// applies to CREATE_REMINDER's customer-then-date.
 func requiredSlotFields(intent IntentType) []SlotField {
 	switch intent {
 	case IntentCreateDebt, IntentRecordPayment:
 		return []SlotField{SlotCustomer, SlotAmount}
+	case IntentCreateReminder:
+		return []SlotField{SlotCustomer, SlotDate}
+	case IntentCancelReminder:
+		return []SlotField{SlotCustomer}
 	default:
 		return nil
 	}
@@ -45,6 +58,14 @@ func missingSlotFields(raw RawIntent, hint ContextHint) []SlotField {
 		case SlotAmount:
 			if raw.AmountMinor == nil || *raw.AmountMinor <= 0 {
 				missing = append(missing, SlotAmount)
+			}
+		case SlotDate:
+			// parseDueDate (validate.go) is the same parser Validate
+			// itself uses — a malformed date is treated as no date at
+			// all, consistently, rather than slot-filling accepting
+			// something execution would then silently drop.
+			if parseDueDate(raw.DueDateISO) == nil {
+				missing = append(missing, SlotDate)
 			}
 		}
 	}
@@ -115,6 +136,11 @@ func (p *Processor) slotFillQuestion(raw RawIntent, field SlotField) Reply {
 			return Reply{Text: fmt.Sprintf(fixedText(slotFillAmountWithNameText, raw.Language), name), Buttons: slotFillCancelButton()}
 		}
 		return Reply{Text: fixedText(slotFillAmountText, raw.Language), Buttons: slotFillCancelButton()}
+	case SlotDate:
+		if name := trimOrEmpty(raw.CustomerName); name != "" {
+			return Reply{Text: fmt.Sprintf(fixedText(slotFillDateWithNameText, raw.Language), name), Buttons: slotFillCancelButton()}
+		}
+		return Reply{Text: fixedText(slotFillDateText, raw.Language), Buttons: slotFillCancelButton()}
 	default: // SlotCustomer
 		return Reply{Text: fixedText(slotFillCustomerText, raw.Language), Buttons: slotFillCancelButton()}
 	}
@@ -124,6 +150,8 @@ func (p *Processor) slotFillReask(raw RawIntent, field SlotField) Reply {
 	switch field {
 	case SlotAmount:
 		return Reply{Text: fixedText(slotFillAmountReaskText, raw.Language), Buttons: slotFillCancelButton()}
+	case SlotDate:
+		return Reply{Text: fixedText(slotFillDateReaskText, raw.Language), Buttons: slotFillCancelButton()}
 	default: // SlotCustomer
 		return Reply{Text: fixedText(slotFillCustomerReaskText, raw.Language), Buttons: slotFillCancelButton()}
 	}
@@ -196,22 +224,24 @@ func (p *Processor) handleSlotFillReply(ctx context.Context, msg InboundMessage,
 
 	var filledName *string
 	var filledAmount *int64
+	var filledDate *string
 	var secondary *RawIntent
 
 	if currentField == SlotCustomer && looksLikeName(text) && !looksLikeAmount(text) {
 		name := text
 		filledName = &name
 	} else {
-		// Either the amount slot (always needs the extractor's own
-		// parsing) or a customer-slot reply that didn't look like a
-		// clean name — understand it holistically.
+		// The amount or date slot (both always need the extractor's own
+		// parsing — "5k"/"tomorrow" aren't deterministically parseable
+		// here) or a customer-slot reply that didn't look like a clean
+		// name — understand it holistically.
 		raw, err := p.cfg.Extractor.Extract(ctx, text)
 		if err != nil {
 			return Reply{}, lang, err
 		}
 		raw.Language = p.resolveStickyLanguage(ctx, msg.UserID, text, raw.Language)
 		secondary = &raw
-		// Check both fields, not just currentField: edge case #6 is a
+		// Check every field, not just currentField: edge case #6 is a
 		// correction to whichever field was already given, which can
 		// arrive while a *different* field is the one currently being
 		// asked about ("Who is this for?" / "Chinedu" / "How much?" /
@@ -223,9 +253,12 @@ func (p *Processor) handleSlotFillReply(ctx context.Context, msg InboundMessage,
 		if raw.AmountMinor != nil && *raw.AmountMinor > 0 {
 			filledAmount = raw.AmountMinor
 		}
+		if d := trimOrEmpty(raw.DueDateISO); d != "" && parseDueDate(&d) != nil {
+			filledDate = &d
+		}
 	}
 
-	filled := filledName != nil || filledAmount != nil
+	filled := filledName != nil || filledAmount != nil || filledDate != nil
 
 	if !filled {
 		if secondary != nil && isReadOnlyFinancialIntent(secondary.Intent) {
@@ -251,6 +284,9 @@ func (p *Processor) handleSlotFillReply(ctx context.Context, msg InboundMessage,
 	}
 	if filledAmount != nil {
 		updated.AmountMinor = filledAmount
+	}
+	if filledDate != nil {
+		updated.DueDateISO = filledDate
 	}
 
 	stillMissing := missingSlotFields(updated, hint)

@@ -78,6 +78,56 @@ func TestAmbiguousError_Hints_NoDescriptionsSupplied_FallsBackToCreationOrder(t 
 	}
 }
 
+// TestAmbiguousError_Hints_AliasTakesPriority is docs/BRIEF-
+// disambiguation-reminders-statements.md Tier 1c: a trader may not
+// remember their own past alias choice, so the alias is shown outright
+// ("Emmanuel (mechanic)" via candidateDisplay/numberedTitle wrapping
+// this Hint) rather than assumed remembered — and it outranks even a
+// distinguishing description, since it's the stronger, deliberate
+// signal.
+func TestAmbiguousError_Hints_AliasTakesPriority(t *testing.T) {
+	alias := "mechanic"
+	err := &customer.AmbiguousError{
+		Candidates: []customer.Customer{
+			{ID: 1, Name: "Emmanuel", Alias: &alias},
+			{ID: 2, Name: "Emmanuel"},
+		},
+	}
+
+	hints := err.Hints(map[int64]string{
+		1: "2 bags of cement",
+		2: "1 bag of cement",
+	})
+
+	if hints[0].Hint != "mechanic" {
+		t.Fatalf("got hint %q, want the alias to take priority over the description", hints[0].Hint)
+	}
+	if hints[1].Hint != "1 bag of cement" {
+		t.Fatalf("got hint %q, want the description for the candidate with no alias", hints[1].Hint)
+	}
+}
+
+// TestAmbiguousError_Hints_PhoneUsedWhenNoAlias confirms phone number
+// is the second rung of Tier 1c's hierarchy, ahead of description.
+func TestAmbiguousError_Hints_PhoneUsedWhenNoAlias(t *testing.T) {
+	phone := "+2348030000099"
+	err := &customer.AmbiguousError{
+		Candidates: []customer.Customer{
+			{ID: 1, Name: "Emmanuel", PhoneNumber: &phone},
+			{ID: 2, Name: "Emmanuel"},
+		},
+	}
+
+	hints := err.Hints(map[int64]string{
+		1: "2 bags of cement",
+		2: "1 bag of cement",
+	})
+
+	if hints[0].Hint != phone {
+		t.Fatalf("got hint %q, want the phone number to take priority over the description", hints[0].Hint)
+	}
+}
+
 func TestAmbiguousError_Hints_PartialDescriptions_StillDistinguish(t *testing.T) {
 	err := &customer.AmbiguousError{
 		Candidates: []customer.Customer{
