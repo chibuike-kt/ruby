@@ -66,7 +66,7 @@ This is the backend, the actual product: the API, the AI pipeline, and the Whats
 1. Clone the repository:
 
 ```
-git clone [backend repo link]
+git clone https://github.com/chibuike-kt/ruby.git
 cd ruby
 ```
 

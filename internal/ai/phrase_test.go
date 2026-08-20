@@ -57,11 +57,11 @@ func TestIsGrounded_RejectsInventedAmount(t *testing.T) {
 }
 
 func TestIsGrounded_OmittedFieldMeansNumberIsUngrounded(t *testing.T) {
-	// EventConfirmationNeeded with no due date: DueDateISO is "", so any
-	// date-shaped number the model states must be rejected — it wasn't
-	// given one.
+	// EventDebtConfirmationNeeded with no due date: DueDateISO is "", so
+	// any date-shaped number the model states must be rejected — it
+	// wasn't given one.
 	amount := int64(7500000)
-	input := PhraseInput{Event: EventConfirmationNeeded, CustomerName: "Chinedu", AmountMinor: &amount}
+	input := PhraseInput{Event: EventDebtConfirmationNeeded, CustomerName: "Chinedu", AmountMinor: &amount}
 
 	if isGrounded("Should I record this for Chinedu, due on the 25th?", input) {
 		t.Fatal("got grounded for a due date the model was never given (DueDateISO was empty)")

@@ -193,8 +193,8 @@ func TestProcessor_LowConfidence_ConfirmThenExecute(t *testing.T) {
 	if _, err := p.Handle(context.Background(), msg1); err != nil {
 		t.Fatalf("Handle (first message): %v", err)
 	}
-	if phraser.last().Event != ai.EventConfirmationNeeded {
-		t.Fatalf("got phrase event %v, want EventConfirmationNeeded", phraser.last().Event)
+	if phraser.last().Event != ai.EventDebtConfirmationNeeded {
+		t.Fatalf("got phrase event %v, want EventDebtConfirmationNeeded (docs/BRIEF-final-demo-fixes.md #2: a debt confirmation must never be phrased as a payment)", phraser.last().Event)
 	}
 	if got := countRows(t, pool, `SELECT count(*) FROM debts WHERE user_id = $1`, userID); got != 0 {
 		t.Fatalf("got %d debts before confirmation, want 0", got)
@@ -209,6 +209,58 @@ func TestProcessor_LowConfidence_ConfirmThenExecute(t *testing.T) {
 	}
 	if phraser.last().Event != ai.EventDebtCreated {
 		t.Fatalf("got phrase event %v after confirmation, want EventDebtCreated", phraser.last().Event)
+	}
+}
+
+// TestProcessor_LowConfidence_RecordPayment_ConfirmationSaysPayment is
+// docs/BRIEF-final-demo-fixes.md #2's regression test, the payment
+// side: a low-confidence RECORD_PAYMENT's confirmation prompt must say
+// "payment," never "debt" — the exact transcript was the reverse case
+// (a debt confirmation phrased as "payment"), but the fix
+// (beginConfirmation picking the event from raw.Intent) must hold in
+// both directions, or the confirmation/result mismatch just moves to
+// this path instead.
+func TestProcessor_LowConfidence_RecordPayment_ConfirmationSaysPayment(t *testing.T) {
+	pool := dbtest.Open(t)
+	rdb := dbtest.OpenRedis(t)
+	userID := dbtest.CreateUser(t, pool, "+2348050000015")
+	customers := customer.NewService(pool)
+	debts := debt.NewService(pool)
+
+	c, err := customers.Create(context.Background(), userID, "Chinedu", nil, nil)
+	if err != nil {
+		t.Fatalf("seed customer: %v", err)
+	}
+	if _, err := debts.Create(context.Background(), userID, c.ID, money.New(7500000, money.NGN), "rice", nil); err != nil {
+		t.Fatalf("seed debt: %v", err)
+	}
+	if err := customer.SetLastCustomerContext(context.Background(), rdb, userID, c.ID, customer.DefaultLastCustomerContextTTL); err != nil {
+		t.Fatalf("seed last customer context: %v", err)
+	}
+
+	extractor := &fakeExtractor{results: []ai.RawIntent{
+		{Intent: ai.IntentRecordPayment, CustomerName: new("Chinedu"), AmountMinor: new(int64(2000000)), Confidence: ai.ConfidenceLow, Language: ai.LangEnglish},
+		{Intent: ai.IntentConfirmAction, Language: ai.LangEnglish},
+	}}
+	phraser := &fakePhraser{}
+	sender := &fakeSender{}
+	p := newTestProcessor(pool, rdb, extractor, phraser, sender)
+
+	if _, err := p.Handle(context.Background(), ai.ToInboundMessage(userID, "wamid.lowconf.pay.1", "text", new("Chinedu paid 20k"))); err != nil {
+		t.Fatalf("Handle (first message): %v", err)
+	}
+	if phraser.last().Event != ai.EventPaymentConfirmationNeeded {
+		t.Fatalf("got phrase event %v, want EventPaymentConfirmationNeeded — a payment confirmation must never be phrased as a debt", phraser.last().Event)
+	}
+
+	if _, err := p.Handle(context.Background(), ai.ToInboundMessage(userID, "wamid.lowconf.pay.2", "text", new("yes"))); err != nil {
+		t.Fatalf("Handle (confirm): %v", err)
+	}
+	if phraser.last().Event != ai.EventPaymentRecorded {
+		t.Fatalf("got phrase event %v after confirmation, want EventPaymentRecorded", phraser.last().Event)
+	}
+	if got := countRows(t, pool, `SELECT count(*) FROM payments`); got != 1 {
+		t.Fatalf("got %d payments after confirmation, want 1", got)
 	}
 }
 

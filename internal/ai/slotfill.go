@@ -43,16 +43,36 @@ func requiredSlotFields(intent IntentType) []SlotField {
 }
 
 // missingSlotFields reports which required fields raw is still missing,
-// in order. hint is consulted so a pronoun-resolvable customer (spec §8
-// signal 4, docs/BRIEF-critical-fixes-and-reminders.md #2c) is never
-// treated as "missing" just because raw.CustomerName is empty — slot-
-// filling and pronoun resolution must never fight each other.
-func missingSlotFields(raw RawIntent, hint ContextHint) []SlotField {
+// in order. hint.ResolvedCustomerID (a one-shot signal from a
+// disambiguation/identity-confirmation the trader just answered) always
+// counts as resolved. hint.LastCustomerID (spec §8 signal 4, docs/
+// BRIEF-critical-fixes-and-reminders.md #2c's pronoun resolution) is
+// trusted to silently resolve identity for a fresh, single-message
+// evaluation (withinSlotFill false) — but only when identity is the
+// *only* thing raw is missing: "he paid me 30k" (amount already given)
+// correctly resolves "he" from the last-referenced customer without
+// asking, while "someone took goods" (amount also missing) must not.
+//
+// Once a multi-turn slot-fill exchange has actually begun
+// (withinSlotFill true — every call from within handleSlotFillReply/
+// handleSlotFillButtonReply), the hint is never trusted for identity at
+// all, regardless of what else has since been filled: docs/BRIEF-final-
+// demo-fixes.md #1's exact bug was the hint silently resolving identity
+// on the *second* pass, once the reply that answered "how much?"
+// happened to fill the amount slot via a secondary extraction — "3k",
+// naming no one, still isn't an identity answer, and once Ruby has
+// committed to asking for identity explicitly it must get an explicit
+// answer, never fall back to a customer mentioned several messages
+// earlier.
+func missingSlotFields(raw RawIntent, hint ContextHint, withinSlotFill bool) []SlotField {
 	var missing []SlotField
 	for _, f := range requiredSlotFields(raw.Intent) {
 		switch f {
 		case SlotCustomer:
-			if trimOrEmpty(raw.CustomerName) == "" && hint.ResolvedCustomerID == nil && hint.LastCustomerID == nil {
+			if trimOrEmpty(raw.CustomerName) != "" || hint.ResolvedCustomerID != nil {
+				continue
+			}
+			if hint.LastCustomerID == nil || withinSlotFill || identityMustBeExplicit(raw) {
 				missing = append(missing, SlotCustomer)
 			}
 		case SlotAmount:
@@ -70,6 +90,20 @@ func missingSlotFields(raw RawIntent, hint ContextHint) []SlotField {
 		}
 	}
 	return missing
+}
+
+// identityMustBeExplicit reports whether raw is missing some *other*
+// required field besides customer identity — see missingSlotFields'
+// own doc comment for why that's the deciding factor.
+func identityMustBeExplicit(raw RawIntent) bool {
+	switch raw.Intent {
+	case IntentCreateDebt, IntentRecordPayment:
+		return raw.AmountMinor == nil || *raw.AmountMinor <= 0
+	case IntentCreateReminder:
+		return parseDueDate(raw.DueDateISO) == nil
+	default:
+		return false
+	}
 }
 
 // looksLikeAmount is the amount slot's own "obviously doesn't match
@@ -170,7 +204,7 @@ func (p *Processor) handleSlotFillButtonReply(ctx context.Context, msg InboundMe
 		if err != nil {
 			return Reply{}, lang, err
 		}
-		missing := missingSlotFields(pending.Intent, hint)
+		missing := missingSlotFields(pending.Intent, hint, true)
 		if len(missing) == 0 {
 			reply, err := p.validateAndExecute(ctx, msg, pending.Intent)
 			return reply, lang, err
@@ -201,7 +235,7 @@ func (p *Processor) handleSlotFillReply(ctx context.Context, msg InboundMessage,
 	if err != nil {
 		return Reply{}, lang, err
 	}
-	missing := missingSlotFields(pending.Intent, hint)
+	missing := missingSlotFields(pending.Intent, hint, true)
 	if len(missing) == 0 {
 		// Shouldn't happen (a complete intent is never left pending) —
 		// "should never happen" isn't "must crash": just execute it.
@@ -289,7 +323,7 @@ func (p *Processor) handleSlotFillReply(ctx context.Context, msg InboundMessage,
 		updated.DueDateISO = filledDate
 	}
 
-	stillMissing := missingSlotFields(updated, hint)
+	stillMissing := missingSlotFields(updated, hint, true)
 	if len(stillMissing) > 0 {
 		// Edge case #1: filled one field, still need another — ask for
 		// the next one, never both at once.
