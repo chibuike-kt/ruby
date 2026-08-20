@@ -6,6 +6,8 @@ package money
 import (
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 )
 
 // ErrNegativeAmount is returned when an operation would produce a negative
@@ -116,4 +118,46 @@ func (m Money) String() string {
 		frac = -frac
 	}
 	return fmt.Sprintf("%s %d.%02d", m.currency, whole, frac)
+}
+
+// FormatNaira renders minor units (kobo) as "₦75,000" (or "₦75,000.50"
+// for a kobo remainder) — a trader/customer-facing display format,
+// unlike String()'s logging-only "NGN 75000.00". Shared by
+// internal/ai (list/summary formatting) and internal/reminder (WhatsApp
+// template body params), so it lives here rather than being duplicated
+// per caller.
+func FormatNaira(minor int64) string {
+	negative := minor < 0
+	if negative {
+		minor = -minor
+	}
+	naira, kobo := minor/100, minor%100
+
+	s := "₦" + groupThousands(strconv.FormatInt(naira, 10))
+	if kobo != 0 {
+		s += fmt.Sprintf(".%02d", kobo)
+	}
+	if negative {
+		s = "-" + s
+	}
+	return s
+}
+
+func groupThousands(digits string) string {
+	n := len(digits)
+	if n <= 3 {
+		return digits
+	}
+	firstGroup := n % 3
+	if firstGroup == 0 {
+		firstGroup = 3
+	}
+
+	var b strings.Builder
+	b.WriteString(digits[:firstGroup])
+	for i := firstGroup; i < n; i += 3 {
+		b.WriteByte(',')
+		b.WriteString(digits[i : i+3])
+	}
+	return b.String()
 }
