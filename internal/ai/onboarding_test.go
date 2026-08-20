@@ -90,6 +90,53 @@ func TestProcessor_Onboarding_NameReply_SavesAcknowledgesAndClearsPending(t *tes
 	}
 }
 
+// TestProcessor_Onboarding_NameReply_ExtractsFromSelfIntroduction is the
+// required regression test for docs/BRIEF-fixes-and-reminders.md #1: a
+// self-introduction reply ("I'm X", "My name is X", ...) must store the
+// extracted name, not the sentence verbatim.
+func TestProcessor_Onboarding_NameReply_ExtractsFromSelfIntroduction(t *testing.T) {
+	cases := []struct {
+		name  string
+		phone string
+		reply string
+	}{
+		{"i'm", "+2348090000010", "I'm Kingsley"},
+		{"my name is", "+2348090000011", "My name is Kingsley"},
+		{"bare (regression)", "+2348090000012", "Kingsley"},
+		{"pidgin na", "+2348090000013", "Na Kingsley"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := dbtest.Open(t)
+			rdb := dbtest.OpenRedis(t)
+			acct, err := account.Create(context.Background(), pool, tc.phone)
+			if err != nil {
+				t.Fatalf("account.Create: %v", err)
+			}
+
+			extractor := &fakeExtractor{}
+			phraser := &fakePhraser{}
+			sender := &fakeSender{}
+			p := newTestProcessor(pool, rdb, extractor, phraser, sender)
+
+			if _, err := p.Handle(context.Background(), ai.ToInboundMessage(acct.ID, "wamid.extract."+tc.name+".1", "text", new("Hi Ruby"))); err != nil {
+				t.Fatalf("Handle (first contact): %v", err)
+			}
+			if _, err := p.Handle(context.Background(), ai.ToInboundMessage(acct.ID, "wamid.extract."+tc.name+".2", "text", new(tc.reply))); err != nil {
+				t.Fatalf("Handle (name reply): %v", err)
+			}
+
+			got, err := account.GetByID(context.Background(), pool, acct.ID)
+			if err != nil {
+				t.Fatalf("GetByID: %v", err)
+			}
+			if got.Name != "Kingsley" {
+				t.Fatalf("got name %q for reply %q, want the extracted name %q", got.Name, tc.reply, "Kingsley")
+			}
+		})
+	}
+}
+
 // TestProcessor_Onboarding_RequestLookingReply_ReasksOnceThenFalls is the
 // required test: a reply that looks like a real request (contains a
 // currency amount) must trigger exactly one re-ask, not immediate
