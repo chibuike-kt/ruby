@@ -188,6 +188,21 @@ func (p *Processor) process(ctx context.Context, msg InboundMessage, acct accoun
 		return p.handleDisambiguationReply(ctx, msg, pending)
 	}
 
+	// docs/BRIEF-polish-and-hardening.md #3: "buttons are additive,
+	// never a replacement for typing the answer" — identity confirmation
+	// and reminder opt-in are yes/no questions, so a typed answer is
+	// classified the same deterministic way as isCancelPhrase, no AI
+	// call, then dispatched through the exact same handler a button tap
+	// uses (see handleIdentityConfirmationButtonReply/
+	// handleReminderOptInButtonReply) so both entry points share one
+	// execution path.
+	if hasPending && pending.Kind == PendingIdentityConfirm {
+		return p.handleIdentityConfirmationTextReply(ctx, msg, pending)
+	}
+	if hasPending && pending.Kind == PendingReminderOptIn {
+		return p.handleReminderOptInTextReply(ctx, msg, pending)
+	}
+
 	// decisions.md #9's "New person" branch (docs/BRIEF-fixes-and-
 	// reminders.md #3): a phone number or alias is a classification
 	// step (phone-shaped or not), not a language-understanding one — no
@@ -277,7 +292,7 @@ func (p *Processor) process(ctx context.Context, msg InboundMessage, acct accoun
 	case IntentConfirmAction:
 		return textReply(fixedText(nothingToConfirmText, lang)), lang, nil
 	case IntentHelp:
-		return textReply(fixedText(helpText, lang)), lang, nil
+		return helpReply(lang), lang, nil
 	case IntentSmallTalk:
 		// docs/BRIEF-critical-fixes-and-reminders.md #3a: brief and
 		// warm, never the capability-list fallback.
@@ -331,6 +346,8 @@ func (p *Processor) handleInteractive(ctx context.Context, msg InboundMessage, p
 			return p.handleIdentityConfirmationButtonReply(ctx, msg, pending, id)
 		case PendingReminderOptIn:
 			return p.handleReminderOptInButtonReply(ctx, msg, pending, id)
+		case PendingSlotFill:
+			return p.handleSlotFillButtonReply(ctx, msg, pending, id)
 		}
 	}
 
@@ -341,7 +358,7 @@ func (p *Processor) handleInteractive(ctx context.Context, msg InboundMessage, p
 		reply, err := p.executeListOutstandingDebts(ctx, msg, RawIntent{Language: LangEnglish})
 		return reply, LangEnglish, err
 	default: // menuHelp and anything unrecognized
-		return textReply(fixedText(helpText, LangEnglish)), LangEnglish, nil
+		return helpReply(LangEnglish), LangEnglish, nil
 	}
 }
 
@@ -449,6 +466,32 @@ func (p *Processor) handleIdentityConfirmationButtonReply(ctx context.Context, m
 	}
 }
 
+// handleIdentityConfirmationTextReply is the free-text counterpart to
+// handleIdentityConfirmationButtonReply (docs/BRIEF-polish-and-
+// hardening.md #3) — an unclassifiable reply re-asks with the same
+// text+buttons the original prompt sent, rather than silently dropping
+// it or misreading it as a fresh, unrelated message.
+func (p *Processor) handleIdentityConfirmationTextReply(ctx context.Context, msg InboundMessage, pending PendingAction) (Reply, Language, error) {
+	lang := pending.Intent.Language
+	if len(pending.Candidates) == 0 {
+		return Reply{}, lang, errors.New("ai: identity confirmation pending with no candidate")
+	}
+	candidate := pending.Candidates[0]
+
+	text, err := p.rawText(ctx, msg)
+	if err != nil {
+		return Reply{}, lang, err
+	}
+	switch yesNoPhrase(text) {
+	case answerYes:
+		return p.handleIdentityConfirmationButtonReply(ctx, msg, pending, buttonIdentitySame)
+	case answerNo:
+		return p.handleIdentityConfirmationButtonReply(ctx, msg, pending, buttonIdentityNew)
+	default:
+		return identityConfirmationReply(lang, candidate.Name), lang, nil
+	}
+}
+
 // beginCustomerSignalRequest is decisions.md #8's creation guard
 // (docs/BRIEF-fixes-and-reminders.md #3's "New person" branch): the
 // trader just said this is *not* the existing candidate, so creating a
@@ -539,6 +582,34 @@ func (p *Processor) handleReminderOptInButtonReply(ctx context.Context, msg Inbo
 	default:
 		// Unrecognized id — re-ask rather than silently dropping it,
 		// same pattern as handleConfirmationButtonReply's default case.
+		_, c, err := p.debtAndCustomer(ctx, msg.UserID, *pending.DebtID)
+		if err != nil {
+			return Reply{}, lang, err
+		}
+		return Reply{Text: reminderOptInSuffix(lang, c.Name), Buttons: reminderOptInButtons()}, lang, nil
+	}
+}
+
+// handleReminderOptInTextReply is the free-text counterpart to
+// handleReminderOptInButtonReply (docs/BRIEF-polish-and-hardening.md
+// #3) — an unclassifiable reply re-asks with the same text+buttons the
+// original opt-in question sent.
+func (p *Processor) handleReminderOptInTextReply(ctx context.Context, msg InboundMessage, pending PendingAction) (Reply, Language, error) {
+	lang := pending.Intent.Language
+	if pending.DebtID == nil {
+		return Reply{}, lang, errors.New("ai: reminder opt-in pending with no debt id")
+	}
+
+	text, err := p.rawText(ctx, msg)
+	if err != nil {
+		return Reply{}, lang, err
+	}
+	switch yesNoPhrase(text) {
+	case answerYes:
+		return p.handleReminderOptInButtonReply(ctx, msg, pending, buttonReminderYes)
+	case answerNo:
+		return p.handleReminderOptInButtonReply(ctx, msg, pending, buttonReminderNo)
+	default:
 		_, c, err := p.debtAndCustomer(ctx, msg.UserID, *pending.DebtID)
 		if err != nil {
 			return Reply{}, lang, err
@@ -844,14 +915,14 @@ func (p *Processor) execute(ctx context.Context, msg InboundMessage, raw RawInte
 	case GetPaymentSummaryAction:
 		return p.executeGetPaymentSummary(ctx, msg, raw)
 	case HelpAction:
-		return textReply(fixedText(helpText, raw.Language)), nil
+		return helpReply(raw.Language), nil
 	case UnsupportedAction:
 		// docs/BRIEF-critical-fixes-and-reminders.md #1c: an honest
 		// decline plus the real capability list — never
 		// reminderUnsupportedText, which is specific to the
 		// recognized-but-not-yet-built reminder intents (those never
 		// reach here at all; see process()'s own switch).
-		return textReply(fixedText(unsupportedRequestText, raw.Language)), nil
+		return unsupportedReply(raw.Language), nil
 	default:
 		return Reply{}, fmt.Errorf("ai: unknown action type %T", action)
 	}
