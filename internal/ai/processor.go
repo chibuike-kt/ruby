@@ -314,7 +314,7 @@ func (p *Processor) process(ctx context.Context, msg InboundMessage, acct accoun
 		if err != nil {
 			return Reply{}, lang, err
 		}
-		if missing := missingSlotFields(raw, hint); len(missing) > 0 {
+		if missing := missingSlotFields(raw, hint, false); len(missing) > 0 {
 			reply, err := p.beginSlotFill(ctx, msg.UserID, raw, missing)
 			return reply, lang, err
 		}
@@ -1147,11 +1147,21 @@ func (p *Processor) beginConfirmation(ctx context.Context, msg InboundMessage, r
 	if err := SetPendingAction(ctx, p.cfg.Redis, msg.UserID, PendingAction{Kind: PendingConfirm, Intent: raw}, DefaultPendingTTL); err != nil {
 		return Reply{}, err
 	}
+	// docs/BRIEF-final-demo-fixes.md #2: which event this is must come
+	// from raw.Intent, the one thing Processor itself already knows for
+	// certain — never left for the Phraser to guess from a generic
+	// shared event name. beginConfirmation is only ever reached from
+	// executeCreateDebt/executeRecordPayment's own low-confidence gate,
+	// so raw.Intent is always one of these two.
+	event := EventDebtConfirmationNeeded
+	if raw.Intent == IntentRecordPayment {
+		event = EventPaymentConfirmationNeeded
+	}
 	// raw.AmountMinor is already *int64 — passed through as-is rather
 	// than defaulted to 0 when nil, so a genuinely-missing amount never
 	// masquerades as a real ₦0 in front of the phrasing model.
 	text, err := p.phrase(ctx, PhraseInput{
-		Event:        EventConfirmationNeeded,
+		Event:        event,
 		Language:     raw.Language,
 		CustomerName: trimOrEmpty(raw.CustomerName),
 		AmountMinor:  raw.AmountMinor,
@@ -1355,7 +1365,7 @@ func (p *Processor) executeListOutstandingDebts(ctx context.Context, msg Inbound
 			return Reply{}, err
 		}
 		outstandingMinor := d.Amount.MinorUnits() - paid
-		lines[i] = outstandingDebtLine{customerName: c.Name, outstandingMinor: outstandingMinor, dueDate: d.DueDate}
+		lines[i] = outstandingDebtLine{customerID: d.CustomerID, customerName: c.Name, outstandingMinor: outstandingMinor, dueDate: d.DueDate}
 		totalMinor += outstandingMinor
 	}
 

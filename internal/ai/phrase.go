@@ -13,19 +13,33 @@ import (
 type PhraseEvent string
 
 const (
-	EventDebtCreated        PhraseEvent = "DEBT_CREATED"
-	EventPaymentRecorded    PhraseEvent = "PAYMENT_RECORDED"
-	EventOverpaymentPrompt  PhraseEvent = "OVERPAYMENT_PROMPT"
-	EventConfirmationNeeded PhraseEvent = "CONFIRMATION_NEEDED"
-	EventAmbiguousCustomer  PhraseEvent = "AMBIGUOUS_CUSTOMER"
-	EventCustomerBalance    PhraseEvent = "CUSTOMER_BALANCE"
-	EventCustomerList       PhraseEvent = "CUSTOMER_LIST"
-	EventTotalOutstanding   PhraseEvent = "TOTAL_OUTSTANDING"
-	EventPaymentSummary     PhraseEvent = "PAYMENT_SUMMARY"
-	EventCustomerNotFound   PhraseEvent = "CUSTOMER_NOT_FOUND"
-	EventNoOutstandingDebt  PhraseEvent = "NO_OUTSTANDING_DEBT"
-	EventAmountRequired     PhraseEvent = "AMOUNT_REQUIRED"
-	EventCustomerRequired   PhraseEvent = "CUSTOMER_REQUIRED"
+	EventDebtCreated       PhraseEvent = "DEBT_CREATED"
+	EventPaymentRecorded   PhraseEvent = "PAYMENT_RECORDED"
+	EventOverpaymentPrompt PhraseEvent = "OVERPAYMENT_PROMPT"
+
+	// EventDebtConfirmationNeeded and EventPaymentConfirmationNeeded
+	// replace the single EventConfirmationNeeded (docs/BRIEF-final-
+	// demo-fixes.md #2): a shared, generic event name gave the Phraser
+	// no reliable signal for which noun to use, and it was guessing
+	// "payment" even for a pending debt creation — the confirmation
+	// prompt and the eventual "Debt recorded" result then flatly
+	// contradicted each other. Two distinct, self-describing event
+	// names (matching the same distinction EventDebtCreated/
+	// EventPaymentRecorded already make for the post-mutation
+	// confirmation) removes the ambiguity at its source rather than
+	// trying to word a shared prompt around it.
+	EventDebtConfirmationNeeded    PhraseEvent = "DEBT_CONFIRMATION_NEEDED"
+	EventPaymentConfirmationNeeded PhraseEvent = "PAYMENT_CONFIRMATION_NEEDED"
+
+	EventAmbiguousCustomer PhraseEvent = "AMBIGUOUS_CUSTOMER"
+	EventCustomerBalance   PhraseEvent = "CUSTOMER_BALANCE"
+	EventCustomerList      PhraseEvent = "CUSTOMER_LIST"
+	EventTotalOutstanding  PhraseEvent = "TOTAL_OUTSTANDING"
+	EventPaymentSummary    PhraseEvent = "PAYMENT_SUMMARY"
+	EventCustomerNotFound  PhraseEvent = "CUSTOMER_NOT_FOUND"
+	EventNoOutstandingDebt PhraseEvent = "NO_OUTSTANDING_DEBT"
+	EventAmountRequired    PhraseEvent = "AMOUNT_REQUIRED"
+	EventCustomerRequired  PhraseEvent = "CUSTOMER_REQUIRED"
 )
 
 // PhraseInput is the only thing a Phraser call ever sees: an
@@ -367,6 +381,18 @@ var totalOutstandingLabelText = map[Language]string{
 	LangHausa:   "Jimillar da ta rage:",
 }
 
+// subtotalLabelText is docs/BRIEF-final-demo-fixes.md #4's per-customer
+// subtotal, shown under a customer's own debts when they have more
+// than one — distinct from totalOutstandingLabelText's grand total
+// across every customer.
+var subtotalLabelText = map[Language]string{
+	LangEnglish: "Subtotal:",
+	LangPidgin:  "Subtotal:",
+	LangYoruba:  "Àpapọ̀ rẹ̀:",
+	LangIgbo:    "Ngụkọta ya:",
+	LangHausa:   "Jimillar sa:",
+}
+
 // noCustomersText and customerListHeaderText back the deterministic
 // LIST_CUSTOMERS formatting in format.go
 // (docs/BRIEF-critical-fixes-and-reminders.md #2a) — same reasoning as
@@ -388,27 +414,21 @@ var customerListHeaderText = map[Language]string{
 	LangHausa:   "Abokan cinikinka:",
 }
 
-// statementHeaderText, statementNoDescriptionText,
-// statementNoPaymentsText, statementPaidLabelText, and
-// statementOutstandingLabelText back the deterministic
+// statementHeaderText, statementNoPaymentsText, statementPaidLabelText,
+// and statementOutstandingLabelText back the deterministic
 // GET_CUSTOMER_STATEMENT formatting in format.go
 // (docs/BRIEF-disambiguation-reminders-statements.md Tier 3) — fixed
 // strings, not a Phraser call, same reasoning as every other
-// deterministic list in this file. %s is the customer name.
+// deterministic list in this file. %s is the customer name. A debt
+// with no description simply omits that piece of the line entirely
+// (docs/BRIEF-final-demo-fixes.md #5) rather than using a placeholder
+// word, so there's no table entry for that case.
 var statementHeaderText = map[Language]string{
 	LangEnglish: "*%s's account*",
 	LangPidgin:  "*%s's account*",
 	LangYoruba:  "*Àkọsílẹ̀ %s*",
 	LangIgbo:    "*Akaụntụ %s*",
 	LangHausa:   "*Asusun %s*",
-}
-
-var statementNoDescriptionText = map[Language]string{
-	LangEnglish: "item",
-	LangPidgin:  "item",
-	LangYoruba:  "ọjà",
-	LangIgbo:    "ihe",
-	LangHausa:   "kaya",
 }
 
 var statementNoPaymentsText = map[Language]string{

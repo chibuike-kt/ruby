@@ -8,9 +8,13 @@ import (
 	"github.com/chibuike-kt/ruby/internal/money"
 )
 
-// outstandingDebtLine is one entry in a LIST_OUTSTANDING_DEBTS reply —
-// see formatOutstandingDebtsList.
+// outstandingDebtLine is one debt in a LIST_OUTSTANDING_DEBTS reply —
+// see formatOutstandingDebtsList. customerID (not just the name) is
+// what grouping keys on — decisions.md #8's own duplicate-name case
+// means two different customers can share a display name, and grouping
+// by name alone would wrongly merge them.
 type outstandingDebtLine struct {
+	customerID       int64
 	customerName     string
 	outstandingMinor int64
 	dueDate          *time.Time
@@ -20,25 +24,66 @@ type outstandingDebtLine struct {
 // precision, no time-of-day noise).
 const dueDateDisplayFormat = "2 Jan"
 
+// customerDebtGroup is one customer's debts, in the order
+// groupDebtsByCustomer first encountered them.
+type customerDebtGroup struct {
+	customerID   int64
+	customerName string
+	debts        []outstandingDebtLine
+}
+
+// groupDebtsByCustomer collapses per-debt lines into one group per
+// customer_id, preserving each group's position at its first debt's
+// original (chronological) place in lines — docs/BRIEF-final-demo-
+// fixes.md #4: a customer with several outstanding debts used to show
+// up as that many separate, non-adjacent entries with no way to tell
+// they belonged together.
+func groupDebtsByCustomer(lines []outstandingDebtLine) []customerDebtGroup {
+	var groups []customerDebtGroup
+	index := make(map[int64]int, len(lines))
+	for _, l := range lines {
+		if i, ok := index[l.customerID]; ok {
+			groups[i].debts = append(groups[i].debts, l)
+			continue
+		}
+		index[l.customerID] = len(groups)
+		groups = append(groups, customerDebtGroup{customerID: l.customerID, customerName: l.customerName, debts: []outstandingDebtLine{l}})
+	}
+	return groups
+}
+
 // formatOutstandingDebtsList builds the "genuinely readable list, not a
 // wall of text" docs/BRIEF-response-quality.md #4 asks for: WhatsApp
-// *bold* on the customer name, amount (and due date, if set) on the
-// next line, a blank line between entries, and — when there's more than
-// one debtor — a closing total line. Entirely deterministic: no AI call,
-// so nothing here can ever violate the isGrounded backstop (there's no
-// Phraser call for it to violate).
+// *bold* on the customer name once per customer (docs/BRIEF-final-
+// demo-fixes.md #4 — grouped, every debt listed under its own
+// customer, with a per-customer subtotal when there's more than one),
+// a blank line between customers, and — when there's more than one
+// debtor — a closing grand-total line. Entirely deterministic: no AI
+// call, so nothing here can ever violate the isGrounded backstop
+// (there's no Phraser call for it to violate).
 func formatOutstandingDebtsList(lines []outstandingDebtLine, totalMinor int64, lang Language) string {
+	groups := groupDebtsByCustomer(lines)
+
 	var b strings.Builder
-	for i, l := range lines {
+	for i, g := range groups {
 		if i > 0 {
 			b.WriteString("\n\n")
 		}
-		fmt.Fprintf(&b, "*%s*\n%s", l.customerName, money.FormatNaira(l.outstandingMinor))
-		if l.dueDate != nil {
-			fmt.Fprintf(&b, " — %s %s", fixedText(dueLabelText, lang), l.dueDate.Format(dueDateDisplayFormat))
+		fmt.Fprintf(&b, "*%s*", g.customerName)
+		var subtotal int64
+		for _, l := range g.debts {
+			b.WriteString("\n")
+			b.WriteString(money.FormatNaira(l.outstandingMinor))
+			if l.dueDate != nil {
+				fmt.Fprintf(&b, " — %s %s", fixedText(dueLabelText, lang), l.dueDate.Format(dueDateDisplayFormat))
+			}
+			subtotal += l.outstandingMinor
+		}
+		if len(g.debts) > 1 {
+			fmt.Fprintf(&b, "\n%s %s", fixedText(subtotalLabelText, lang), money.FormatNaira(subtotal))
 		}
 	}
-	if len(lines) > 1 {
+	if len(groups) > 1 {
 		fmt.Fprintf(&b, "\n\n%s *%s*", fixedText(totalOutstandingLabelText, lang), money.FormatNaira(totalMinor))
 	}
 	return b.String()
@@ -73,11 +118,13 @@ func formatCustomerStatement(customerName string, lines []statementDebtLine, out
 		if i > 0 {
 			b.WriteString("\n\n")
 		}
-		desc := l.description
-		if desc == "" {
-			desc = fixedText(statementNoDescriptionText, lang)
+		// docs/BRIEF-final-demo-fixes.md #5: a missing description just
+		// doesn't render that piece — never a placeholder word standing
+		// in for it.
+		if l.description != "" {
+			fmt.Fprintf(&b, "*%s* — ", l.description)
 		}
-		fmt.Fprintf(&b, "*%s* — %s (%s)", desc, money.FormatNaira(l.amountMinor), l.date.Format(dueDateDisplayFormat))
+		fmt.Fprintf(&b, "%s (%s)", money.FormatNaira(l.amountMinor), l.date.Format(dueDateDisplayFormat))
 		if len(l.payments) == 0 {
 			fmt.Fprintf(&b, "\n%s", fixedText(statementNoPaymentsText, lang))
 			continue
