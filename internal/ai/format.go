@@ -2,9 +2,10 @@ package ai
 
 import (
 	"fmt"
-	"strconv"
 	"strings"
 	"time"
+
+	"github.com/chibuike-kt/ruby/internal/money"
 )
 
 // outstandingDebtLine is one entry in a LIST_OUTSTANDING_DEBTS reply —
@@ -32,53 +33,33 @@ func formatOutstandingDebtsList(lines []outstandingDebtLine, totalMinor int64, l
 		if i > 0 {
 			b.WriteString("\n\n")
 		}
-		fmt.Fprintf(&b, "*%s*\n%s", l.customerName, formatNaira(l.outstandingMinor))
+		fmt.Fprintf(&b, "*%s*\n%s", l.customerName, money.FormatNaira(l.outstandingMinor))
 		if l.dueDate != nil {
 			fmt.Fprintf(&b, " — %s %s", fixedText(dueLabelText, lang), l.dueDate.Format(dueDateDisplayFormat))
 		}
 	}
 	if len(lines) > 1 {
-		fmt.Fprintf(&b, "\n\n%s *%s*", fixedText(totalOutstandingLabelText, lang), formatNaira(totalMinor))
+		fmt.Fprintf(&b, "\n\n%s *%s*", fixedText(totalOutstandingLabelText, lang), money.FormatNaira(totalMinor))
 	}
 	return b.String()
 }
 
-// formatNaira renders minor units as "₦75,000" (or "₦75,000.50" for a
-// kobo remainder) — display-only, mirrors money.Money.String()'s own
-// "not for parsing back" caveat but with the thousands separators a
-// trader-facing message actually needs.
-func formatNaira(minor int64) string {
-	negative := minor < 0
-	if negative {
-		minor = -minor
-	}
-	naira, kobo := minor/100, minor%100
-
-	s := "₦" + groupThousands(strconv.FormatInt(naira, 10))
-	if kobo != 0 {
-		s += fmt.Sprintf(".%02d", kobo)
-	}
-	if negative {
-		s = "-" + s
-	}
-	return s
-}
-
-func groupThousands(digits string) string {
-	n := len(digits)
-	if n <= 3 {
-		return digits
-	}
-	firstGroup := n % 3
-	if firstGroup == 0 {
-		firstGroup = 3
-	}
-
+// formatCustomerList builds LIST_CUSTOMERS' reply deterministically
+// (docs/BRIEF-critical-fixes-and-reminders.md #2a) — the same reasoning
+// as formatOutstandingDebtsList: a list of real names is exactly the
+// kind of content a Phraser call could drop or hallucinate around,
+// especially the empty case (an empty/omitted Items field left the
+// model to improvise a "stub response with no content"). Deterministic
+// formatting sidesteps that entirely — no Phraser call, so nothing here
+// can violate isGrounded either.
+func formatCustomerList(names []string, lang Language) string {
 	var b strings.Builder
-	b.WriteString(digits[:firstGroup])
-	for i := firstGroup; i < n; i += 3 {
-		b.WriteByte(',')
-		b.WriteString(digits[i : i+3])
+	fmt.Fprintf(&b, "%s\n\n", fixedText(customerListHeaderText, lang))
+	for i, name := range names {
+		if i > 0 {
+			b.WriteString("\n")
+		}
+		fmt.Fprintf(&b, "- *%s*", name)
 	}
 	return b.String()
 }
