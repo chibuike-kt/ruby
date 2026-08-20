@@ -178,13 +178,32 @@ func truncateName(name string) string {
 	return string(r[:maxNameLength])
 }
 
+// commandLikePhrases are common menu/command words a trader might send
+// while a name-capture question is pending (docs/BRIEF-disambiguation-
+// reminders-statements.md Tier 0's adjacent finding) — short and
+// word-shaped enough to otherwise pass looksLikeName's loose digit/
+// currency check, but never a plausible name. A false-positive match
+// here silently overwrites the trader's real name with e.g. "Help,"
+// clearing the pending question and swallowing their actual request in
+// the same stroke — exactly the class of bug a stuck-in-onboarding
+// report would describe. English only, same reasoning as the greeting
+// menu's own button labels (confirmationButtons et al.): short generic
+// command words read fine across every supported language without a
+// translation table.
+var commandLikePhrases = map[string]bool{
+	"help": true, "menu": true, "balance": true, "cancel": true, "stop": true,
+	"record a debt": true, "who owes me": true, "confirm": true, "edit": true,
+}
+
 // looksLikeName is plan step 5's not-obviously-not-a-name check: reject
 // anything digit-bearing (amounts, phone numbers, dates — "digits in a
 // pattern that looks like a debt/payment message"), anything carrying a
-// currency marker, and anything too long or multi-worded to plausibly
-// be just a name. It is deliberately permissive otherwise — "a trader's
-// name is whatever they say it is" (plan step 7); this only screens out
-// the shape of a real financial request, not stylistic name choices.
+// currency marker, a question (a name is never phrased as one), a known
+// cancel phrase or command/menu word, and anything too long or
+// multi-worded to plausibly be just a name. It is deliberately
+// permissive otherwise — "a trader's name is whatever they say it is"
+// (plan step 7); this only screens out the shape of a real request, not
+// stylistic name choices.
 func looksLikeName(text string) bool {
 	trimmed := strings.TrimSpace(text)
 	if trimmed == "" {
@@ -200,12 +219,18 @@ func looksLikeName(text string) bool {
 		if r >= '0' && r <= '9' {
 			return false
 		}
+		if r == '?' {
+			return false
+		}
 	}
 	lower := strings.ToLower(trimmed)
 	for _, marker := range []string{"₦", "ngn", "naira", "kobo", "$"} {
 		if strings.Contains(lower, marker) {
 			return false
 		}
+	}
+	if isCancelPhrase(trimmed) || commandLikePhrases[normalizeGreeting(trimmed)] {
+		return false
 	}
 	return true
 }

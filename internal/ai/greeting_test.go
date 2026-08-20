@@ -112,6 +112,29 @@ func TestLooksLikeName_RejectsRequestShapedReplies(t *testing.T) {
 	}
 }
 
+// TestLooksLikeName_RejectsCommandAndMenuPhrases is docs/BRIEF-
+// disambiguation-reminders-statements.md Tier 0's adjacent finding: a
+// trader replying with a normal command/menu word ("Help", "Who owes
+// me?") while a name-capture question is pending must never have that
+// silently stored as their name — this loose check previously accepted
+// any short, digit-free, question-mark-free text, which is exactly
+// what these command phrases are shaped like.
+func TestLooksLikeName_RejectsCommandAndMenuPhrases(t *testing.T) {
+	cases := []string{
+		"Help", "help",
+		"Who owes me?", "who owes me",
+		"Menu", "Balance",
+		"Cancel", "cancel", "never mind", "forget it",
+		"Record a debt",
+		"Confirm", "Edit",
+	}
+	for _, text := range cases {
+		if looksLikeName(text) {
+			t.Errorf("looksLikeName(%q) = true, want false — this is a command/menu phrase, not a name", text)
+		}
+	}
+}
+
 func TestTruncateName_CapsLength(t *testing.T) {
 	long := ""
 	for range 100 {

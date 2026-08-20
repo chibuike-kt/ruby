@@ -194,6 +194,49 @@ func TestProcessor_Onboarding_RequestLookingReply_ReasksOnceThenFalls(t *testing
 	}
 }
 
+// TestProcessor_Onboarding_CommandLookingReply_ReasksInsteadOfAccepting
+// is docs/BRIEF-disambiguation-reminders-statements.md Tier 0's
+// adjacent finding, exercised end to end: a trader who replies with a
+// normal command word ("Help") while a name-capture question is
+// pending must get re-asked, never have "Help" silently stored as their
+// name — that would clear the pending question and swallow their real
+// request in the same stroke.
+func TestProcessor_Onboarding_CommandLookingReply_ReasksInsteadOfAccepting(t *testing.T) {
+	pool := dbtest.Open(t)
+	rdb := dbtest.OpenRedis(t)
+	acct, err := account.Create(context.Background(), pool, "+2348090000009")
+	if err != nil {
+		t.Fatalf("account.Create: %v", err)
+	}
+
+	extractor := &fakeExtractor{}
+	phraser := &fakePhraser{}
+	sender := &fakeSender{}
+	p := newTestProcessor(pool, rdb, extractor, phraser, sender)
+
+	if _, err := p.Handle(context.Background(), ai.ToInboundMessage(acct.ID, "wamid.onboard.9a", "text", new("Hi Ruby"))); err != nil {
+		t.Fatalf("Handle (first contact): %v", err)
+	}
+
+	reask, err := p.Handle(context.Background(), ai.ToInboundMessage(acct.ID, "wamid.onboard.9b", "text", new("Help")))
+	if err != nil {
+		t.Fatalf("Handle (command-looking reply): %v", err)
+	}
+	if !strings.Contains(strings.ToLower(reask.Text), "name") {
+		t.Fatalf("got reply %q, want the re-ask, not the real HELP response", reask.Text)
+	}
+	got, err := account.GetByID(context.Background(), pool, acct.ID)
+	if err != nil {
+		t.Fatalf("GetByID: %v", err)
+	}
+	if got.Name != "" {
+		t.Fatalf("got name %q after \"Help\", want still empty — must not accept a command word as the name", got.Name)
+	}
+	if len(extractor.calls) != 0 {
+		t.Fatalf("got %d extractor calls, want 0 — name capture is fully deterministic", len(extractor.calls))
+	}
+}
+
 // TestProcessor_Onboarding_ButtonTapWhileAwaitingName is the required
 // test: tapping a quick-action button instead of replying with a name
 // is treated as a non-name reply (triggers the re-ask), and the
