@@ -29,6 +29,24 @@ func (e *CustomerNotFoundError) Error() string {
 	return fmt.Sprintf("ai: no customer named %q", e.Name)
 }
 
+// IdentityConfirmationError means CREATE_DEBT or RECORD_PAYMENT named a
+// customer by bare name that resolved to exactly one existing customer,
+// with nothing stronger confirming it's actually them
+// (docs/BRIEF-fixes-and-reminders.md #3, decisions.md #9). Unlike
+// *customer.AmbiguousError (multiple candidates, pick one),
+// there's exactly one candidate here — the question isn't "which one,"
+// it's "is this even the same person." Silently assuming yes risks
+// misattributing a debt/payment; silently treating it as a new person
+// risks the indistinguishable duplicate decisions.md #8 already guards
+// against. Processor turns this into a same/new prompt (see pending.go).
+type IdentityConfirmationError struct {
+	Candidate customer.Customer
+}
+
+func (e *IdentityConfirmationError) Error() string {
+	return fmt.Sprintf("ai: %q matches an existing customer, needs same/new confirmation", e.Candidate.Name)
+}
+
 // ContextHint carries conversational signals the Validator can't derive
 // from RawIntent alone. ResolvedCustomerID (spec §8 signal 3) takes
 // priority over CustomerName entirely — it's Ruby's own answer to a
@@ -108,7 +126,7 @@ func (v *Validator) validateRecordPayment(ctx context.Context, userID int64, raw
 	if err != nil {
 		return nil, err
 	}
-	customerID, err := v.resolveExistingCustomer(ctx, userID, raw.CustomerName, hint)
+	customerID, err := v.resolveExistingCustomer(ctx, userID, raw.CustomerName, hint, true)
 	if err != nil {
 		return nil, err
 	}
@@ -116,7 +134,11 @@ func (v *Validator) validateRecordPayment(ctx context.Context, userID int64, raw
 }
 
 func (v *Validator) validateGetCustomerBalance(ctx context.Context, userID int64, raw RawIntent, hint ContextHint) (Action, error) {
-	customerID, err := v.resolveExistingCustomer(ctx, userID, raw.CustomerName, hint)
+	// checkIdentity is false here: a balance lookup doesn't attribute
+	// anything to anyone, so there's nothing for a wrong same/new guess
+	// to get wrong (docs/BRIEF-fixes-and-reminders.md #3 only names
+	// CREATE_DEBT/RECORD_PAYMENT).
+	customerID, err := v.resolveExistingCustomer(ctx, userID, raw.CustomerName, hint, false)
 	if err != nil {
 		return nil, err
 	}
@@ -124,18 +146,20 @@ func (v *Validator) validateGetCustomerBalance(ctx context.Context, userID int64
 }
 
 // resolveExistingCustomer never creates — used by every intent except
-// CREATE_DEBT.
-func (v *Validator) resolveExistingCustomer(ctx context.Context, userID int64, name *string, hint ContextHint) (int64, error) {
+// CREATE_DEBT. checkIdentity gates decisions.md #9's same/new prompt
+// (docs/BRIEF-fixes-and-reminders.md #3) — only CREATE_DEBT/
+// RECORD_PAYMENT pass true.
+func (v *Validator) resolveExistingCustomer(ctx context.Context, userID int64, name *string, hint ContextHint, checkIdentity bool) (int64, error) {
 	ref, err := customerRefFrom(name, hint)
 	if err != nil {
 		return 0, err
 	}
-	c, err := v.Customers.Resolve(ctx, userID, ref)
+	c, err := v.resolve(ctx, userID, ref, hint, checkIdentity)
 	if err != nil {
 		if errors.Is(err, customer.ErrNotFound) {
 			return 0, &CustomerNotFoundError{Name: trimOrEmpty(name)}
 		}
-		return 0, err // includes *customer.AmbiguousError
+		return 0, err // includes *customer.AmbiguousError, *IdentityConfirmationError
 	}
 	return c.ID, nil
 }
@@ -149,7 +173,7 @@ func (v *Validator) resolveOrNewCustomer(ctx context.Context, userID int64, name
 	if err != nil {
 		return CustomerRef{}, err
 	}
-	c, err := v.Customers.Resolve(ctx, userID, ref)
+	c, err := v.resolve(ctx, userID, ref, hint, true)
 	switch {
 	case err == nil:
 		id := c.ID
@@ -164,8 +188,31 @@ func (v *Validator) resolveOrNewCustomer(ctx context.Context, userID int64, name
 		n := *ref.Name
 		return CustomerRef{NewName: &n}, nil
 	default:
-		return CustomerRef{}, err // includes *customer.AmbiguousError
+		return CustomerRef{}, err // includes *customer.AmbiguousError, *IdentityConfirmationError
 	}
+}
+
+// resolve wraps customer.Service.Resolve with decisions.md #9's
+// same/new gate. It only ever applies to a bare-name match (ref.Name set
+// — customerRefFrom only sets this when there's no stronger signal:
+// no prior disambiguation resolution via hint.ResolvedCustomerID) that
+// resolved to exactly one existing customer: *customer.AmbiguousError
+// already covers more than one, and a signal-3 (hint.ResolvedCustomerID)
+// or signal-4 (hint.LastCustomerID corroborating the very match just
+// found) resolution means something already confirmed this is them, so
+// there's nothing left to ask.
+func (v *Validator) resolve(ctx context.Context, userID int64, ref customer.Ref, hint ContextHint, checkIdentity bool) (customer.Customer, error) {
+	c, err := v.Customers.Resolve(ctx, userID, ref)
+	if err != nil {
+		return customer.Customer{}, err
+	}
+	if !checkIdentity || ref.Name == nil {
+		return c, nil
+	}
+	if hint.LastCustomerID != nil && *hint.LastCustomerID == c.ID {
+		return c, nil
+	}
+	return customer.Customer{}, &IdentityConfirmationError{Candidate: c}
 }
 
 func customerRefFrom(name *string, hint ContextHint) (customer.Ref, error) {
