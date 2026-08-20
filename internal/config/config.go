@@ -12,11 +12,16 @@ const defaultRateLimitPerMinute = 30
 const defaultAIModel = "gpt-5.6-terra"
 const defaultTimezone = "Africa/Lagos"
 
-// defaultReminderTemplateName is a placeholder until a real template is
-// submitted and approved by Meta (docs/BRIEF-fixes-and-reminders.md
-// #4) — configurable via WHATSAPP_REMINDER_TEMPLATE_NAME so swapping in
-// the approved name is a config change, not a code change.
-const defaultReminderTemplateName = "debt_reminder"
+// defaultCustomerReminderTemplateName and defaultTraderReminderTemplateName
+// are placeholders until real templates are submitted and approved by
+// Meta (docs/BRIEF-fixes-and-reminders.md #4, docs/BRIEF-critical-
+// fixes-and-reminders.md's full reminder system) — two separate
+// templates, since the customer-facing and trader-facing message
+// bodies are genuinely different (spec §18's own two examples).
+// Configurable via env so swapping in the approved names is a config
+// change, not a code change.
+const defaultCustomerReminderTemplateName = "debt_reminder_customer"
+const defaultTraderReminderTemplateName = "debt_reminder_trader"
 
 type Config struct {
 	Port               string
@@ -49,12 +54,15 @@ type Config struct {
 	// concrete "today" before they ever reach the AI prompt (spec §21).
 	DefaultTimezone string
 
-	// ReminderTemplateName is the Meta-approved WhatsApp template every
-	// reminder is sent through (docs/BRIEF-fixes-and-reminders.md #4).
-	// Until a real one is approved, Dispatch will fail every send with
-	// a real Cloud API error naming this template — see
+	// CustomerReminderTemplateName and TraderReminderTemplateName are
+	// the two Meta-approved WhatsApp templates reminders are sent
+	// through (docs/BRIEF-fixes-and-reminders.md #4, docs/BRIEF-
+	// critical-fixes-and-reminders.md's full reminder system). Until
+	// real ones are approved, Dispatch will fail every send with a
+	// real Cloud API error naming these templates — see
 	// internal/reminder.Service.Dispatch's doc comment.
-	ReminderTemplateName string
+	CustomerReminderTemplateName string
+	TraderReminderTemplateName   string
 
 	// WemaPartnerToken authenticates the Credit Profile API
 	// (docs/wema-integration.md) — a static bearer token for the demo,
@@ -67,20 +75,21 @@ type Config struct {
 
 func Load() (Config, error) {
 	cfg := Config{
-		Port:                  getEnv("PORT", "8080"),
-		Env:                   getEnv("ENV", "development"),
-		DatabaseURL:           os.Getenv("DATABASE_URL"),
-		RedisURL:              os.Getenv("REDIS_URL"),
-		RateLimitPerMinute:    defaultRateLimitPerMinute,
-		WhatsAppAppSecret:     os.Getenv("WHATSAPP_APP_SECRET"),
-		WhatsAppVerifyToken:   os.Getenv("WHATSAPP_WEBHOOK_VERIFY_TOKEN"),
-		WhatsAppAccessToken:   os.Getenv("WHATSAPP_ACCESS_TOKEN"),
-		WhatsAppPhoneNumberID: os.Getenv("WHATSAPP_PHONE_NUMBER_ID"),
-		AIProviderAPIKey:      os.Getenv("AI_PROVIDER_API_KEY"),
-		AIModel:               getEnv("AI_MODEL", defaultAIModel),
-		DefaultTimezone:       getEnv("DEFAULT_TIMEZONE", defaultTimezone),
-		ReminderTemplateName:  getEnv("WHATSAPP_REMINDER_TEMPLATE_NAME", defaultReminderTemplateName),
-		WemaPartnerToken:      os.Getenv("WEMA_PARTNER_TOKEN"),
+		Port:                         getEnv("PORT", "8080"),
+		Env:                          getEnv("ENV", "development"),
+		DatabaseURL:                  os.Getenv("DATABASE_URL"),
+		RedisURL:                     os.Getenv("REDIS_URL"),
+		RateLimitPerMinute:           defaultRateLimitPerMinute,
+		WhatsAppAppSecret:            os.Getenv("WHATSAPP_APP_SECRET"),
+		WhatsAppVerifyToken:          os.Getenv("WHATSAPP_WEBHOOK_VERIFY_TOKEN"),
+		WhatsAppAccessToken:          os.Getenv("WHATSAPP_ACCESS_TOKEN"),
+		WhatsAppPhoneNumberID:        os.Getenv("WHATSAPP_PHONE_NUMBER_ID"),
+		AIProviderAPIKey:             os.Getenv("AI_PROVIDER_API_KEY"),
+		AIModel:                      getEnv("AI_MODEL", defaultAIModel),
+		DefaultTimezone:              getEnv("DEFAULT_TIMEZONE", defaultTimezone),
+		CustomerReminderTemplateName: getEnv("WHATSAPP_CUSTOMER_REMINDER_TEMPLATE_NAME", defaultCustomerReminderTemplateName),
+		TraderReminderTemplateName:   getEnv("WHATSAPP_TRADER_REMINDER_TEMPLATE_NAME", defaultTraderReminderTemplateName),
+		WemaPartnerToken:             os.Getenv("WEMA_PARTNER_TOKEN"),
 	}
 	if cfg.DatabaseURL == "" {
 		return Config{}, fmt.Errorf("config: DATABASE_URL is required")

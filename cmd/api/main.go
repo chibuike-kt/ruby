@@ -56,7 +56,7 @@ func main() {
 	// whatsappService satisfies reminder.TemplateSender structurally —
 	// same one-directional-import shape as ai.Sender/ai.MediaDownloader
 	// above (plan decision #10).
-	reminders := reminder.NewService(pool, whatsappService, cfg.ReminderTemplateName)
+	reminders := reminder.NewService(pool, whatsappService, cfg.CustomerReminderTemplateName, cfg.TraderReminderTemplateName)
 
 	// The AI processor needs whatsappService (to send replies / download
 	// media) and whatsappService needs the processor (to handle inbound

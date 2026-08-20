@@ -13,7 +13,8 @@ func TestLoad_Defaults(t *testing.T) {
 	t.Setenv("RATE_LIMIT_PER_MINUTE", "")
 	t.Setenv("AI_MODEL", "")
 	t.Setenv("DEFAULT_TIMEZONE", "")
-	t.Setenv("WHATSAPP_REMINDER_TEMPLATE_NAME", "")
+	t.Setenv("WHATSAPP_CUSTOMER_REMINDER_TEMPLATE_NAME", "")
+	t.Setenv("WHATSAPP_TRADER_REMINDER_TEMPLATE_NAME", "")
 
 	cfg, err := config.Load()
 	if err != nil {
@@ -31,8 +32,11 @@ func TestLoad_Defaults(t *testing.T) {
 	if cfg.DefaultTimezone != "Africa/Lagos" {
 		t.Fatalf("got default timezone %q, want Africa/Lagos", cfg.DefaultTimezone)
 	}
-	if cfg.ReminderTemplateName != "debt_reminder" {
-		t.Fatalf("got reminder template name %q, want debt_reminder", cfg.ReminderTemplateName)
+	if cfg.CustomerReminderTemplateName != "debt_reminder_customer" {
+		t.Fatalf("got customer reminder template name %q, want debt_reminder_customer", cfg.CustomerReminderTemplateName)
+	}
+	if cfg.TraderReminderTemplateName != "debt_reminder_trader" {
+		t.Fatalf("got trader reminder template name %q, want debt_reminder_trader", cfg.TraderReminderTemplateName)
 	}
 }
 
