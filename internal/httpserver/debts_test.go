@@ -38,6 +38,29 @@ func TestCreateDebt(t *testing.T) {
 	}
 }
 
+// TestCreateDebt_NoDueDate_Succeeds is docs/BRIEF-critical-fixes-and-
+// reminders.md #1a's REST-path counterpart to TestCreateDebt (which
+// already omits due_date) — explicit by name so the requirement is
+// asserted, not just incidentally exercised.
+func TestCreateDebt_NoDueDate_Succeeds(t *testing.T) {
+	env := newTestEnv(t)
+	userID := env.newUser(t, "+2348080000099")
+	customerID := createTestCustomer(t, env, userID, "Chinedu")
+
+	rec := env.do(t, http.MethodPost, "/api/debts", userID, map[string]any{
+		"customer_id":  customerID,
+		"amount_minor": 5000000,
+	}, nil)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("got status %d, want 201 — a missing due_date must not fail, body=%s", rec.Code, rec.Body.String())
+	}
+	body := decodeBody[map[string]any](t, rec)
+	if v, ok := body["due_date"]; ok && v != nil {
+		t.Fatalf("got due_date %v, want absent/null — never invent one", v)
+	}
+}
+
 func TestCreateDebt_WithDueDate(t *testing.T) {
 	env := newTestEnv(t)
 	userID := env.newUser(t, "+2348080000002")
