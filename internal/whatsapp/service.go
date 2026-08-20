@@ -223,6 +223,16 @@ func (s *Service) receiveMessage(ctx context.Context, msg Message) (Outcome, err
 		return outcome, nil
 	}
 
+	// Typing indicator + read receipt (docs/BRIEF-polish-and-hardening.md
+	// #1): the very first thing that happens after dedup, before the
+	// message is even stored — every message reaching this point is one
+	// Ruby is actually going to respond to. Best-effort: a failed call
+	// here must never block message processing, and the indicator lapses
+	// on its own after 25s or the real reply, so there's nothing to retry.
+	if err := markReadWithTyping(ctx, s.accessToken, s.phoneNumberID, msg.ID); err != nil && s.logger != nil {
+		s.logger.Warn("failed to send read receipt/typing indicator", "error", err)
+	}
+
 	userID, err := s.resolveOrCreateUser(ctx, msg.From)
 	if err != nil {
 		return outcome, err
