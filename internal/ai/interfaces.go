@@ -10,12 +10,15 @@ type Extractor interface {
 	Extract(ctx context.Context, text string) (RawIntent, error)
 }
 
-// Transcriber turns already-transcoded audio into text. langHints are
-// passed through to the provider's own language-hint mechanism —
-// Processor always offers all five supported languages, never narrows
-// based on a guess.
+// Transcriber turns already-transcoded audio into text. No language
+// hint is passed to the provider (docs/BRIEF-fixes-and-reminders.md
+// #2): gpt-transcribe's real API rejects any form of a multi-language
+// hint field with a 400, confirmed against the live endpoint — every
+// voice note was failing at this exact step. detectedLanguage comes
+// from the transcription response itself, which already reports it
+// without needing a hint.
 type Transcriber interface {
-	Transcribe(ctx context.Context, audio []byte, langHints []Language) (transcript string, detectedLanguage Language, err error)
+	Transcribe(ctx context.Context, audio []byte) (transcript string, detectedLanguage Language, err error)
 }
 
 // Transcoder converts a WhatsApp voice note (.ogg/Opus) into a format

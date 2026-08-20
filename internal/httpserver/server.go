@@ -33,7 +33,10 @@ type Server struct {
 	Payments           *payment.Service
 	Webhooks           *whatsapp.Service
 	RateLimitPerMinute int
-	Logger             *slog.Logger
+	// WemaPartnerToken authenticates GET /api/credit-profile/{user_id}
+	// (docs/wema-integration.md) — see middleware.PartnerAuth.
+	WemaPartnerToken string
+	Logger           *slog.Logger
 }
 
 func NewRouter(s *Server) http.Handler {
@@ -55,6 +58,14 @@ func NewRouter(s *Server) http.Handler {
 		r.Post("/whatsapp", s.receiveWhatsAppWebhook)
 	})
 
+	// Wema (or any future partner) authenticates as itself, not as a
+	// trader — no X-User-ID to send, no reason to sit inside the
+	// TempAuth-protected group below (docs/wema-integration.md).
+	r.Route("/api/credit-profile", func(r chi.Router) {
+		r.Use(middleware.PartnerAuth(s.WemaPartnerToken))
+		r.Get("/{user_id}", s.getCreditProfile)
+	})
+
 	rateLimited := middleware.RateLimit(s.Redis, s.RateLimitPerMinute, rateLimitWindow)
 
 	r.Route("/api", func(r chi.Router) {
@@ -71,6 +82,8 @@ func NewRouter(s *Server) http.Handler {
 
 		r.Get("/ledger", s.listLedger)
 		r.Get("/summary", s.summary)
+
+		r.Patch("/credit-profile-sharing", s.setCreditProfileSharing)
 	})
 
 	return r

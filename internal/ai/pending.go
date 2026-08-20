@@ -18,6 +18,24 @@ const (
 	PendingConfirm              PendingKind = "confirm"
 	PendingDisambiguateCustomer PendingKind = "disambiguate_customer"
 	PendingAwaitingName         PendingKind = "awaiting_name"
+
+	// PendingIdentityConfirm and PendingAwaitingCustomerSignal implement
+	// decisions.md #9 (docs/BRIEF-fixes-and-reminders.md #3): a name
+	// match to exactly one existing customer, with nothing else
+	// confirming it's them, asks same-or-new rather than guessing.
+	// PendingIdentityConfirm is that question itself; a "new" answer
+	// moves to PendingAwaitingCustomerSignal, decisions.md #8's
+	// creation-time guard (a phone number or alias, so the new record
+	// isn't an indistinguishable duplicate of the one just ruled out).
+	PendingIdentityConfirm        PendingKind = "identity_confirm"
+	PendingAwaitingCustomerSignal PendingKind = "awaiting_customer_signal"
+
+	// PendingReminderOptIn and PendingAwaitingReminderPhone implement
+	// docs/BRIEF-fixes-and-reminders.md #4: the yes/no question right
+	// after a debt is created, and — only on "yes" with no phone number
+	// already on file — the follow-up asking for one.
+	PendingReminderOptIn         PendingKind = "reminder_opt_in"
+	PendingAwaitingReminderPhone PendingKind = "awaiting_reminder_phone"
 )
 
 // PendingCandidateOption is one candidate in a disambiguation prompt —
@@ -104,6 +122,14 @@ type PendingAction struct {
 	// OriginalMessage and ReaskCount are used by PendingAwaitingName only.
 	OriginalMessage *PendingOriginalMessage
 	ReaskCount      int
+
+	// DebtID is used by PendingReminderOptIn and
+	// PendingAwaitingReminderPhone only (docs/BRIEF-fixes-and-
+	// reminders.md #4) — the debt the reminder opt-in question is
+	// about. The customer and due date are re-fetched from it rather
+	// than duplicated here, so this pending state can never go stale
+	// relative to the debt record itself.
+	DebtID *int64
 }
 
 // DefaultPendingTTL matches the conversational-context window the rest

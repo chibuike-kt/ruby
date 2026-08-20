@@ -196,6 +196,65 @@ func sendInteractiveList(ctx context.Context, accessToken, phoneNumberID, to, bo
 	return postMessage(ctx, accessToken, phoneNumberID, reqBody)
 }
 
+type templateRequest struct {
+	MessagingProduct string          `json:"messaging_product"`
+	To               string          `json:"to"`
+	Type             string          `json:"type"`
+	Template         templateMessage `json:"template"`
+}
+
+type templateMessage struct {
+	Name       string              `json:"name"`
+	Language   templateLanguage    `json:"language"`
+	Components []templateComponent `json:"components,omitempty"`
+}
+
+type templateLanguage struct {
+	Code string `json:"code"`
+}
+
+type templateComponent struct {
+	Type       string              `json:"type"`
+	Parameters []templateParameter `json:"parameters"`
+}
+
+type templateParameter struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
+}
+
+// sendTemplate posts a WhatsApp template message — the Cloud API's
+// required shape for any business-initiated conversation outside an
+// active 24-hour customer service window
+// (docs/BRIEF-fixes-and-reminders.md #4). bodyParams fill the
+// template's numbered {{1}}, {{2}}, ... placeholders in its one BODY
+// component, in order — this client doesn't support header/button
+// components, since the reminder template this exists for doesn't need
+// them.
+func sendTemplate(ctx context.Context, accessToken, phoneNumberID, to, templateName, languageCode string, bodyParams []string) (string, error) {
+	params := make([]templateParameter, len(bodyParams))
+	for i, p := range bodyParams {
+		params[i] = templateParameter{Type: "text", Text: p}
+	}
+
+	reqBody, err := json.Marshal(templateRequest{
+		MessagingProduct: "whatsapp",
+		To:               strings.TrimPrefix(to, "+"),
+		Type:             "template",
+		Template: templateMessage{
+			Name:     templateName,
+			Language: templateLanguage{Code: languageCode},
+			Components: []templateComponent{
+				{Type: "body", Parameters: params},
+			},
+		},
+	})
+	if err != nil {
+		return "", err
+	}
+	return postMessage(ctx, accessToken, phoneNumberID, reqBody)
+}
+
 // postMessage is the shared HTTP mechanics for every POST
 // /{phone_number_id}/messages call (text, buttons, list) — only the
 // marshaled body differs between them.

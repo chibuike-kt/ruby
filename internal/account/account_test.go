@@ -64,3 +64,40 @@ func TestGetByPhoneNumber_ExactFormatRequired(t *testing.T) {
 		t.Fatalf("got %v, want ErrNotFound for a differently-formatted number", err)
 	}
 }
+
+// TestSetCreditProfileSharing covers docs/wema-integration.md's opt-in
+// flag: off by default, explicit opt-in, and revocable.
+func TestSetCreditProfileSharing(t *testing.T) {
+	pool := dbtest.Open(t)
+	userID := dbtest.CreateUser(t, pool, "+2348110000104")
+
+	initial, err := account.GetByID(context.Background(), pool, userID)
+	if err != nil {
+		t.Fatalf("GetByID: %v", err)
+	}
+	if initial.CreditProfileSharingEnabled {
+		t.Fatal("got sharing enabled by default, want off")
+	}
+
+	if err := account.SetCreditProfileSharing(context.Background(), pool, userID, true); err != nil {
+		t.Fatalf("SetCreditProfileSharing(true): %v", err)
+	}
+	enabled, err := account.GetByID(context.Background(), pool, userID)
+	if err != nil {
+		t.Fatalf("GetByID: %v", err)
+	}
+	if !enabled.CreditProfileSharingEnabled {
+		t.Fatal("got sharing still disabled after opting in")
+	}
+
+	if err := account.SetCreditProfileSharing(context.Background(), pool, userID, false); err != nil {
+		t.Fatalf("SetCreditProfileSharing(false): %v", err)
+	}
+	revoked, err := account.GetByID(context.Background(), pool, userID)
+	if err != nil {
+		t.Fatalf("GetByID: %v", err)
+	}
+	if revoked.CreditProfileSharingEnabled {
+		t.Fatal("got sharing still enabled after revoking — consent must be revocable")
+	}
+}

@@ -18,6 +18,7 @@ import (
 	"github.com/chibuike-kt/ruby/internal/debt"
 	"github.com/chibuike-kt/ruby/internal/ledger"
 	"github.com/chibuike-kt/ruby/internal/payment"
+	"github.com/chibuike-kt/ruby/internal/reminder"
 )
 
 var supportedLanguages = []Language{LangEnglish, LangPidgin, LangYoruba, LangIgbo, LangHausa}
@@ -89,6 +90,7 @@ type Config struct {
 	Customers *customer.Service
 	Debts     *debt.Service
 	Payments  *payment.Service
+	Reminders *reminder.Service
 
 	Logger *slog.Logger
 }
@@ -168,6 +170,21 @@ func (p *Processor) process(ctx context.Context, msg InboundMessage, acct accoun
 
 	if hasPending && pending.Kind == PendingDisambiguateCustomer {
 		return p.handleDisambiguationReply(ctx, msg, pending)
+	}
+
+	// decisions.md #9's "New person" branch (docs/BRIEF-fixes-and-
+	// reminders.md #3): a phone number or alias is a classification
+	// step (phone-shaped or not), not a language-understanding one — no
+	// AI call, same reasoning as disambiguation's text-reply matching.
+	if hasPending && pending.Kind == PendingAwaitingCustomerSignal {
+		return p.handleCustomerSignalReply(ctx, msg, pending)
+	}
+
+	// docs/BRIEF-fixes-and-reminders.md #4's phone-on-file follow-up —
+	// deterministic phone-shape check, no AI call, same reasoning as
+	// the customer-signal step above.
+	if hasPending && pending.Kind == PendingAwaitingReminderPhone {
+		return p.handleReminderPhoneReply(ctx, msg, pending)
 	}
 
 	text, detectedLang, err := p.resolveText(ctx, msg)
@@ -251,6 +268,10 @@ func (p *Processor) handleInteractive(ctx context.Context, msg InboundMessage, p
 			return p.handleDisambiguationButtonReply(ctx, msg, pending, id)
 		case PendingConfirm:
 			return p.handleConfirmationButtonReply(ctx, msg, pending, id)
+		case PendingIdentityConfirm:
+			return p.handleIdentityConfirmationButtonReply(ctx, msg, pending, id)
+		case PendingReminderOptIn:
+			return p.handleReminderOptInButtonReply(ctx, msg, pending, id)
 		}
 	}
 
@@ -322,6 +343,234 @@ func (p *Processor) handleConfirmationButtonReply(ctx context.Context, msg Inbou
 	}
 }
 
+// beginIdentityConfirmation is decisions.md #9's entry point
+// (docs/BRIEF-fixes-and-reminders.md #3): CREATE_DEBT/RECORD_PAYMENT
+// named a customer whose name matched exactly one existing customer,
+// with nothing else confirming it's them. Parks the intent pending a
+// same/new answer, exactly like beginConfirmation/beginDisambiguation —
+// no new infrastructure, just a new trigger condition.
+func (p *Processor) beginIdentityConfirmation(ctx context.Context, msg InboundMessage, raw RawIntent, identity *IdentityConfirmationError) (Reply, error) {
+	candidate := PendingCandidateOption{CustomerID: identity.Candidate.ID, Name: identity.Candidate.Name}
+	if identity.Candidate.PhoneNumber != nil {
+		candidate.Phone = *identity.Candidate.PhoneNumber
+	}
+	if err := SetPendingAction(ctx, p.cfg.Redis, msg.UserID, PendingAction{
+		Kind:       PendingIdentityConfirm,
+		Intent:     raw,
+		Candidates: []PendingCandidateOption{candidate},
+	}, DefaultPendingTTL); err != nil {
+		return Reply{}, err
+	}
+	return identityConfirmationReply(raw.Language, identity.Candidate.Name), nil
+}
+
+func (p *Processor) handleIdentityConfirmationButtonReply(ctx context.Context, msg InboundMessage, pending PendingAction, id string) (Reply, Language, error) {
+	lang := pending.Intent.Language
+	if len(pending.Candidates) == 0 {
+		return Reply{}, lang, errors.New("ai: identity confirmation pending with no candidate")
+	}
+	candidate := pending.Candidates[0]
+
+	switch id {
+	case buttonIdentitySame:
+		if err := ClearPendingAction(ctx, p.cfg.Redis, msg.UserID); err != nil {
+			p.logf("failed to clear pending action", "error", err)
+		}
+		resolvedID := candidate.CustomerID
+		reply, err := p.validateAndExecuteWithHint(ctx, msg, pending.Intent, ContextHint{ResolvedCustomerID: &resolvedID})
+		return reply, lang, err
+	case buttonIdentityNew:
+		reply, err := p.beginCustomerSignalRequest(ctx, msg, pending, candidate.Name)
+		return reply, lang, err
+	default:
+		// Unrecognized id while an identity confirmation is pending —
+		// re-ask rather than silently dropping it, same pattern as
+		// handleConfirmationButtonReply's default case.
+		return identityConfirmationReply(lang, candidate.Name), lang, nil
+	}
+}
+
+// beginCustomerSignalRequest is decisions.md #8's creation guard
+// (docs/BRIEF-fixes-and-reminders.md #3's "New person" branch): the
+// trader just said this is *not* the existing candidate, so creating a
+// same-named record needs a phone number or alias first. The pending
+// intent carries forward unchanged — it's replayed once the signal is
+// captured (handleCustomerSignalReply).
+func (p *Processor) beginCustomerSignalRequest(ctx context.Context, msg InboundMessage, pending PendingAction, existingName string) (Reply, error) {
+	lang := pending.Intent.Language
+	if err := SetPendingAction(ctx, p.cfg.Redis, msg.UserID, PendingAction{
+		Kind:   PendingAwaitingCustomerSignal,
+		Intent: pending.Intent,
+	}, DefaultPendingTTL); err != nil {
+		return Reply{}, err
+	}
+	return customerSignalRequestReply(lang, existingName), nil
+}
+
+// handleCustomerSignalReply captures the phone/alias decisions.md #8
+// requires, creates the new (same-named) customer, and replays the
+// original CREATE_DEBT/RECORD_PAYMENT intent against it — deterministic
+// classification (phone-shaped text vs. alias), never an AI call, same
+// reasoning as handleDisambiguationReply.
+func (p *Processor) handleCustomerSignalReply(ctx context.Context, msg InboundMessage, pending PendingAction) (Reply, Language, error) {
+	lang := pending.Intent.Language
+
+	text, err := p.rawText(ctx, msg)
+	if err != nil {
+		return Reply{}, lang, err
+	}
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return textReply(customerSignalReaskText), lang, nil
+	}
+
+	name := trimOrEmpty(pending.Intent.CustomerName)
+	if name == "" {
+		return Reply{}, lang, errors.New("ai: awaiting customer signal with no pending customer name")
+	}
+
+	var phone, alias *string
+	if looksLikePhone(text) {
+		phone = &text
+	} else {
+		alias = &text
+	}
+
+	c, err := p.cfg.Customers.Create(ctx, msg.UserID, name, phone, alias)
+	if err != nil {
+		return Reply{}, lang, err
+	}
+	if err := ClearPendingAction(ctx, p.cfg.Redis, msg.UserID); err != nil {
+		p.logf("failed to clear pending action", "error", err)
+	}
+
+	resolvedID := c.ID
+	reply, err := p.validateAndExecuteWithHint(ctx, msg, pending.Intent, ContextHint{ResolvedCustomerID: &resolvedID})
+	return reply, lang, err
+}
+
+// beginReminderOptIn parks the just-created debt pending a yes/no
+// answer to the reminder question (docs/BRIEF-fixes-and-reminders.md
+// #4). Only DebtID is stored — the customer and due date are re-fetched
+// from the debt itself when the answer comes back, rather than
+// duplicated into Redis, so this can never go stale relative to the
+// debt record.
+func (p *Processor) beginReminderOptIn(ctx context.Context, userID, debtID int64, lang Language) error {
+	return SetPendingAction(ctx, p.cfg.Redis, userID, PendingAction{
+		Kind:   PendingReminderOptIn,
+		Intent: RawIntent{Language: lang},
+		DebtID: &debtID,
+	}, DefaultPendingTTL)
+}
+
+func (p *Processor) handleReminderOptInButtonReply(ctx context.Context, msg InboundMessage, pending PendingAction, id string) (Reply, Language, error) {
+	lang := pending.Intent.Language
+	if pending.DebtID == nil {
+		return Reply{}, lang, errors.New("ai: reminder opt-in pending with no debt id")
+	}
+
+	switch id {
+	case buttonReminderYes:
+		return p.handleReminderOptInYes(ctx, msg, *pending.DebtID, lang)
+	case buttonReminderNo:
+		if err := ClearPendingAction(ctx, p.cfg.Redis, msg.UserID); err != nil {
+			p.logf("failed to clear pending action", "error", err)
+		}
+		return textReply(fixedText(reminderDeclinedText, lang)), lang, nil
+	default:
+		// Unrecognized id — re-ask rather than silently dropping it,
+		// same pattern as handleConfirmationButtonReply's default case.
+		_, c, err := p.debtAndCustomer(ctx, msg.UserID, *pending.DebtID)
+		if err != nil {
+			return Reply{}, lang, err
+		}
+		return Reply{Text: reminderOptInSuffix(lang, c.Name), Buttons: reminderOptInButtons()}, lang, nil
+	}
+}
+
+// handleReminderOptInYes is decisions.md's phone-on-file branch
+// (docs/BRIEF-fixes-and-reminders.md #4): schedule immediately if the
+// customer already has a phone number, otherwise ask for one first.
+func (p *Processor) handleReminderOptInYes(ctx context.Context, msg InboundMessage, debtID int64, lang Language) (Reply, Language, error) {
+	d, c, err := p.debtAndCustomer(ctx, msg.UserID, debtID)
+	if err != nil {
+		return Reply{}, lang, err
+	}
+
+	if c.PhoneNumber == nil || strings.TrimSpace(*c.PhoneNumber) == "" {
+		if err := SetPendingAction(ctx, p.cfg.Redis, msg.UserID, PendingAction{
+			Kind:   PendingAwaitingReminderPhone,
+			Intent: RawIntent{Language: lang},
+			DebtID: &debtID,
+		}, DefaultPendingTTL); err != nil {
+			return Reply{}, lang, err
+		}
+		return textReply(fixedText(reminderPhoneRequestText, lang)), lang, nil
+	}
+
+	return p.scheduleReminder(ctx, msg, d, c, lang)
+}
+
+// handleReminderPhoneReply captures the phone number decisions.md's
+// guard requires before scheduling — deterministic (phone-shaped or
+// not), never an AI call, same reasoning as handleCustomerSignalReply.
+func (p *Processor) handleReminderPhoneReply(ctx context.Context, msg InboundMessage, pending PendingAction) (Reply, Language, error) {
+	lang := pending.Intent.Language
+	if pending.DebtID == nil {
+		return Reply{}, lang, errors.New("ai: awaiting reminder phone with no debt id")
+	}
+
+	text, err := p.rawText(ctx, msg)
+	if err != nil {
+		return Reply{}, lang, err
+	}
+	text = strings.TrimSpace(text)
+	if !looksLikePhone(text) {
+		return textReply(reminderPhoneReaskText), lang, nil
+	}
+
+	d, c, err := p.debtAndCustomer(ctx, msg.UserID, *pending.DebtID)
+	if err != nil {
+		return Reply{}, lang, err
+	}
+	if err := customer.SetPhone(ctx, p.cfg.Pool, c.ID, text); err != nil {
+		return Reply{}, lang, err
+	}
+	c.PhoneNumber = &text
+
+	return p.scheduleReminder(ctx, msg, d, c, lang)
+}
+
+// scheduleReminder is the shared tail of both the phone-already-on-file
+// and just-captured-it paths: schedule via internal/reminder, clear the
+// pending state, confirm.
+func (p *Processor) scheduleReminder(ctx context.Context, msg InboundMessage, d debt.Debt, c customer.Customer, lang Language) (Reply, Language, error) {
+	if p.cfg.Reminders != nil && d.DueDate != nil {
+		if _, err := p.cfg.Reminders.OptIn(ctx, d.ID, c.ID, *d.DueDate); err != nil {
+			return Reply{}, lang, err
+		}
+	}
+	if err := ClearPendingAction(ctx, p.cfg.Redis, msg.UserID); err != nil {
+		p.logf("failed to clear pending action", "error", err)
+	}
+	return textReply(fmt.Sprintf(fixedText(reminderScheduledText, lang), c.Name)), lang, nil
+}
+
+// debtAndCustomer re-fetches the debt and its customer for a reminder
+// opt-in pending state — see beginReminderOptIn's doc comment on why
+// this is re-fetched rather than carried in Redis.
+func (p *Processor) debtAndCustomer(ctx context.Context, userID, debtID int64) (debt.Debt, customer.Customer, error) {
+	d, err := p.cfg.Debts.Get(ctx, userID, debtID)
+	if err != nil {
+		return debt.Debt{}, customer.Customer{}, err
+	}
+	c, err := customer.GetByID(ctx, p.cfg.Pool, userID, d.CustomerID)
+	if err != nil {
+		return debt.Debt{}, customer.Customer{}, err
+	}
+	return d, c, nil
+}
+
 // resolveText returns the plain text behind a text or audio message —
 // for audio, this runs the full download -> transcode -> transcribe
 // pipeline (spec §22). It does not judge whether the text is
@@ -344,20 +593,33 @@ func (p *Processor) resolveText(ctx context.Context, msg InboundMessage) (string
 
 // transcribeAudio runs the full download -> transcode -> transcribe
 // pipeline (spec §22) and is also reused by rawText, which needs raw
-// text but not a fresh intent extraction.
+// text but not a fresh intent extraction. Handle already logs procErr
+// generically for every processing failure, but that's a Warn-level
+// catch-all that doesn't say which of these three steps actually broke
+// (docs/BRIEF-fixes-and-reminders.md #2) — every voice note was
+// returning the same generic failure message with no way to tell
+// download/transcode/transcribe apart, so each step logs its own error
+// at Error level, tagged by stage, before returning it up.
 func (p *Processor) transcribeAudio(ctx context.Context, msg InboundMessage) (string, Language, error) {
 	if msg.MediaID == nil {
 		return "", "", errors.New("ai: audio message missing media id")
 	}
 	ogg, _, err := p.cfg.Media.DownloadMedia(ctx, *msg.MediaID)
 	if err != nil {
+		p.errf("voice note pipeline failed", "stage", "download", "error", err)
 		return "", "", err
 	}
 	transcoded, err := p.cfg.Transcoder.Transcode(ctx, ogg)
 	if err != nil {
+		p.errf("voice note pipeline failed", "stage", "transcode", "error", err)
 		return "", "", err
 	}
-	return p.cfg.Transcriber.Transcribe(ctx, transcoded, supportedLanguages)
+	text, lang, err := p.cfg.Transcriber.Transcribe(ctx, transcoded)
+	if err != nil {
+		p.errf("voice note pipeline failed", "stage", "transcribe", "error", err)
+		return "", "", err
+	}
+	return text, lang, nil
 }
 
 func (p *Processor) rawText(ctx context.Context, msg InboundMessage) (string, error) {
@@ -432,6 +694,10 @@ func (p *Processor) contextHint(ctx context.Context, userID int64) (ContextHint,
 func (p *Processor) handleValidationError(ctx context.Context, msg InboundMessage, raw RawIntent, err error) (Reply, error) {
 	if ambiguous, ok := errors.AsType[*customer.AmbiguousError](err); ok {
 		return p.beginDisambiguation(ctx, msg, raw, ambiguous)
+	}
+
+	if identity, ok := errors.AsType[*IdentityConfirmationError](err); ok {
+		return p.beginIdentityConfirmation(ctx, msg, raw, identity)
 	}
 
 	if notFound, ok := errors.AsType[*CustomerNotFoundError](err); ok {
@@ -561,7 +827,27 @@ func (p *Processor) executeCreateDebt(ctx context.Context, msg InboundMessage, r
 		DueDateISO:       dueDateISO,
 		Description:      d.Description,
 	})
-	return textReply(text), err
+	if err != nil {
+		return textReply(text), err
+	}
+	reply := textReply(text)
+
+	// The reminder opt-in question only makes sense with a due date to
+	// count down to (docs/BRIEF-fixes-and-reminders.md #4) — combined
+	// into this same confirmation message, not a separate follow-up
+	// turn (same reasoning as firstContactReply). Reminders == nil means
+	// this Processor was wired without the feature (e.g. an older test
+	// double) — offering something Ruby couldn't actually schedule if
+	// the trader said yes would be worse than not offering it.
+	if p.cfg.Reminders != nil && d.DueDate != nil {
+		if beginErr := p.beginReminderOptIn(ctx, msg.UserID, d.ID, raw.Language); beginErr != nil {
+			p.logf("failed to set reminder opt-in pending state", "error", beginErr)
+		} else {
+			reply.Text += "\n\n" + reminderOptInSuffix(raw.Language, customerName)
+			reply.Buttons = reminderOptInButtons()
+		}
+	}
+	return reply, nil
 }
 
 func (p *Processor) resolveOrCreateCustomer(ctx context.Context, userID int64, ref CustomerRef) (int64, string, error) {
@@ -847,4 +1133,14 @@ func (p *Processor) logf(msg string, args ...any) {
 		return
 	}
 	p.cfg.Logger.Warn(msg, args...)
+}
+
+// errf is logf's Error-level counterpart, for failures worth surfacing
+// above the generic per-message Warn in Handle — see transcribeAudio's
+// stage-tagged logging (docs/BRIEF-fixes-and-reminders.md #2).
+func (p *Processor) errf(msg string, args ...any) {
+	if p.cfg.Logger == nil {
+		return
+	}
+	p.cfg.Logger.Error(msg, args...)
 }

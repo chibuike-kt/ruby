@@ -123,7 +123,7 @@ type fakeTranscriber struct {
 	receivedRef *[]byte
 }
 
-func (f fakeTranscriber) Transcribe(_ context.Context, audio []byte, _ []ai.Language) (string, ai.Language, error) {
+func (f fakeTranscriber) Transcribe(_ context.Context, audio []byte) (string, ai.Language, error) {
 	if f.receivedRef != nil {
 		*f.receivedRef = audio
 	}
@@ -417,6 +417,15 @@ func TestProcessor_Overpayment_ConfirmsAtOutstandingNotAttempted(t *testing.T) {
 	}
 	if _, err := debts.Create(context.Background(), userID, c.ID, money.New(7500000, money.NGN), "rice", nil); err != nil {
 		t.Fatalf("seed debt: %v", err)
+	}
+	// Recent conversational context (spec §8 signal 4) corroborating
+	// that "Ngozi" means this exact customer — without it, a bare-name
+	// RECORD_PAYMENT match to exactly one existing customer now triggers
+	// decisions.md #9's identity confirmation instead of resolving
+	// directly (docs/BRIEF-fixes-and-reminders.md #3), which isn't what
+	// this test is exercising.
+	if err := customer.SetLastCustomerContext(context.Background(), rdb, userID, c.ID, customer.DefaultLastCustomerContextTTL); err != nil {
+		t.Fatalf("seed last customer context: %v", err)
 	}
 
 	extractor := &fakeExtractor{results: []ai.RawIntent{

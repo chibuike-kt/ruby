@@ -19,17 +19,18 @@ import (
 var ErrNotFound = errors.New("account: not found")
 
 type Account struct {
-	ID           int64
-	Name         string
-	PhoneNumber  string
-	BusinessName *string
-	CreatedAt    time.Time
-	UpdatedAt    time.Time
+	ID                          int64
+	Name                        string
+	PhoneNumber                 string
+	BusinessName                *string
+	CreditProfileSharingEnabled bool
+	CreatedAt                   time.Time
+	UpdatedAt                   time.Time
 }
 
 func GetByID(ctx context.Context, q db.Querier, id int64) (Account, error) {
 	row := q.QueryRow(ctx, `
-		SELECT id, name, phone_number, business_name, created_at, updated_at
+		SELECT id, name, phone_number, business_name, credit_profile_sharing_enabled, created_at, updated_at
 		FROM users WHERE id = $1
 	`, id)
 	return scan(row)
@@ -42,7 +43,7 @@ func GetByID(ctx context.Context, q db.Querier, id int64) (Account, error) {
 // function does no normalization of its own.
 func GetByPhoneNumber(ctx context.Context, q db.Querier, phone string) (Account, error) {
 	row := q.QueryRow(ctx, `
-		SELECT id, name, phone_number, business_name, created_at, updated_at
+		SELECT id, name, phone_number, business_name, credit_profile_sharing_enabled, created_at, updated_at
 		FROM users WHERE phone_number = $1
 	`, phone)
 	return scan(row)
@@ -56,7 +57,7 @@ func GetByPhoneNumber(ctx context.Context, q db.Querier, phone string) (Account,
 func Create(ctx context.Context, q db.Querier, phone string) (Account, error) {
 	row := q.QueryRow(ctx, `
 		INSERT INTO users (name, phone_number) VALUES ('', $1)
-		RETURNING id, name, phone_number, business_name, created_at, updated_at
+		RETURNING id, name, phone_number, business_name, credit_profile_sharing_enabled, created_at, updated_at
 	`, phone)
 	return scan(row)
 }
@@ -69,9 +70,18 @@ func SetName(ctx context.Context, q db.Querier, id int64, name string) error {
 	return err
 }
 
+// SetCreditProfileSharing toggles a trader's consent to share their
+// aggregate credit profile with a partner (docs/wema-integration.md) —
+// off by default, explicit opt-in only, revocable by calling this again
+// with enabled=false.
+func SetCreditProfileSharing(ctx context.Context, q db.Querier, id int64, enabled bool) error {
+	_, err := q.Exec(ctx, `UPDATE users SET credit_profile_sharing_enabled = $1, updated_at = now() WHERE id = $2`, enabled, id)
+	return err
+}
+
 func scan(row pgx.Row) (Account, error) {
 	var a Account
-	err := row.Scan(&a.ID, &a.Name, &a.PhoneNumber, &a.BusinessName, &a.CreatedAt, &a.UpdatedAt)
+	err := row.Scan(&a.ID, &a.Name, &a.PhoneNumber, &a.BusinessName, &a.CreditProfileSharingEnabled, &a.CreatedAt, &a.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Account{}, ErrNotFound
 	}

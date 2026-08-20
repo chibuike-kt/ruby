@@ -3,7 +3,6 @@ package ai
 import (
 	"context"
 	"fmt"
-	"strings"
 
 	"github.com/chibuike-kt/ruby/internal/account"
 )
@@ -35,7 +34,7 @@ func (p *Processor) handleNameCapture(ctx context.Context, msg InboundMessage) (
 	if err != nil {
 		return Reply{}, LangEnglish, err
 	}
-	name := strings.TrimSpace(text)
+	name := extractName(text)
 	if looksLikeName(name) {
 		return p.acceptName(ctx, msg.UserID, name, pending.OriginalMessage)
 	}

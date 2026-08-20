@@ -34,6 +34,15 @@ func GetByID(ctx context.Context, q db.Querier, userID, id int64) (Customer, err
 	return c, err
 }
 
+// SetPhone saves a phone number captured after the customer record
+// already existed — the reminder opt-in flow's own trigger
+// (docs/BRIEF-fixes-and-reminders.md #4: "the customer has no phone
+// number on file -> ask for it now").
+func SetPhone(ctx context.Context, q db.Querier, id int64, phone string) error {
+	_, err := q.Exec(ctx, `UPDATE customers SET phone_number = $1, updated_at = now() WHERE id = $2`, phone, id)
+	return err
+}
+
 func FindByPhone(ctx context.Context, q db.Querier, userID int64, phone string) ([]Customer, error) {
 	return list(ctx, q, `
 		SELECT id, user_id, name, phone_number, alias, created_at, updated_at

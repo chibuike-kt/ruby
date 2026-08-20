@@ -9,9 +9,16 @@ import (
 	"github.com/chibuike-kt/ruby/internal/ai"
 )
 
+// TestTranscribe_RequestShape is also the regression test for
+// docs/BRIEF-fixes-and-reminders.md #2's root cause: an earlier version
+// sent a repeated "languages" field, which the live gpt-transcribe
+// endpoint rejects outright (400 invalid_value) regardless of audio
+// content — every voice note failed at exactly this step. Verified live
+// against the real endpoint while debugging; asserting its absence here
+// keeps it from regressing silently.
 func TestTranscribe_RequestShape(t *testing.T) {
 	var gotAuth, gotModel string
-	var gotLanguages []string
+	var gotLanguagesField bool
 	var gotFileBytes []byte
 
 	withTestServer(t, func(w http.ResponseWriter, r *http.Request) {
@@ -28,7 +35,7 @@ func TestTranscribe_RequestShape(t *testing.T) {
 		_ = params
 
 		gotModel = r.FormValue("model")
-		gotLanguages = r.MultipartForm.Value["languages"]
+		_, gotLanguagesField = r.MultipartForm.Value["languages"]
 
 		file, _, err := r.FormFile("file")
 		if err != nil {
@@ -40,12 +47,11 @@ func TestTranscribe_RequestShape(t *testing.T) {
 		gotFileBytes = buf[:n]
 
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"text":"Chinedu took 75k","language":"en"}`))
+		_, _ = w.Write([]byte(`{"text":"Chinedu took 75k","languages":[{"code":"en"}]}`))
 	})
 
 	tr := NewTranscriber("test-key")
-	text, lang, err := tr.Transcribe(context.Background(), []byte("fake-mp3-bytes"),
-		[]ai.Language{ai.LangEnglish, ai.LangPidgin, ai.LangYoruba, ai.LangIgbo, ai.LangHausa})
+	text, lang, err := tr.Transcribe(context.Background(), []byte("fake-mp3-bytes"))
 	if err != nil {
 		t.Fatalf("Transcribe: %v", err)
 	}
@@ -56,14 +62,34 @@ func TestTranscribe_RequestShape(t *testing.T) {
 	if gotModel != "gpt-transcribe" {
 		t.Fatalf("got model %q, want gpt-transcribe", gotModel)
 	}
-	if len(gotLanguages) != 5 {
-		t.Fatalf("got %d languages hints, want 5 (all supported languages, never narrowed)", len(gotLanguages))
+	if gotLanguagesField {
+		t.Fatal("got a \"languages\" field on the request — the live API rejects this with a 400 on every call, see docs/BRIEF-fixes-and-reminders.md #2")
 	}
 	if string(gotFileBytes) != "fake-mp3-bytes" {
 		t.Fatalf("got file bytes %q, want fake-mp3-bytes", gotFileBytes)
 	}
 	if text != "Chinedu took 75k" || lang != ai.LangEnglish {
 		t.Fatalf("got (%q, %q), want (\"Chinedu took 75k\", \"en\")", text, lang)
+	}
+}
+
+// TestTranscribe_NoLanguagesInResponse covers a transcript the model
+// couldn't confidently attribute to a language at all — the response's
+// "languages" array can be empty, and that must not be treated as an
+// error, just an empty detected language.
+func TestTranscribe_NoLanguagesInResponse(t *testing.T) {
+	withTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"text":"","languages":[]}`))
+	})
+
+	tr := NewTranscriber("test-key")
+	text, lang, err := tr.Transcribe(context.Background(), []byte("fake-mp3-bytes"))
+	if err != nil {
+		t.Fatalf("Transcribe: %v", err)
+	}
+	if text != "" || lang != "" {
+		t.Fatalf("got (%q, %q), want (\"\", \"\")", text, lang)
 	}
 }
 
@@ -74,7 +100,7 @@ func TestTranscribe_NonOKStatus(t *testing.T) {
 	})
 
 	tr := NewTranscriber("test-key")
-	if _, _, err := tr.Transcribe(context.Background(), []byte("bad-bytes"), []ai.Language{ai.LangEnglish}); err == nil {
+	if _, _, err := tr.Transcribe(context.Background(), []byte("bad-bytes")); err == nil {
 		t.Fatal("expected an error for a non-200 response, got nil")
 	}
 }

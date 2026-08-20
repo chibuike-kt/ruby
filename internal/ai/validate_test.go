@@ -41,7 +41,14 @@ func TestValidate_CreateDebt_NewCustomer(t *testing.T) {
 	}
 }
 
-func TestValidate_CreateDebt_ExistingCustomer(t *testing.T) {
+// TestValidate_CreateDebt_ExistingCustomer_NeedsIdentityConfirmation is
+// decisions.md #9's own trigger case (docs/BRIEF-fixes-and-reminders.md
+// #3): a bare name matching exactly one existing customer, with nothing
+// else confirming it's them, must not silently resolve — that's the
+// same guess spec §11 forbids, just at exactly-one-match instead of
+// many. See TestValidate_CreateDebt_ExistingCustomer_ResolvedByContext
+// below for the case where it correctly does resolve.
+func TestValidate_CreateDebt_ExistingCustomer_NeedsIdentityConfirmation(t *testing.T) {
 	pool := dbtest.Open(t)
 	userID := dbtest.CreateUser(t, pool, "+2348010000002")
 	customers := customer.NewService(pool)
@@ -51,13 +58,45 @@ func TestValidate_CreateDebt_ExistingCustomer(t *testing.T) {
 	}
 
 	v := ai.NewValidator(customers)
-	action, err := v.Validate(context.Background(), userID, ai.RawIntent{
+	_, err = v.Validate(context.Background(), userID, ai.RawIntent{
 		Intent:       ai.IntentCreateDebt,
 		CustomerName: new("Ngozi"),
 		AmountMinor:  new(int64(1000000)),
 		Confidence:   ai.ConfidenceHigh,
 		Language:     ai.LangEnglish,
 	}, ai.ContextHint{})
+
+	var identity *ai.IdentityConfirmationError
+	if !errors.As(err, &identity) {
+		t.Fatalf("got error %v, want *ai.IdentityConfirmationError", err)
+	}
+	if identity.Candidate.ID != existing.ID {
+		t.Fatalf("got candidate id %d, want %d", identity.Candidate.ID, existing.ID)
+	}
+}
+
+// TestValidate_CreateDebt_ExistingCustomer_ResolvedByContext is the
+// corroborated case: the same name match as above, but hint.LastCustomerID
+// already points at that exact customer (spec §8 signal 4 — recent
+// conversational context), so it resolves without asking again.
+func TestValidate_CreateDebt_ExistingCustomer_ResolvedByContext(t *testing.T) {
+	pool := dbtest.Open(t)
+	userID := dbtest.CreateUser(t, pool, "+2348010000012")
+	customers := customer.NewService(pool)
+	existing, err := customers.Create(context.Background(), userID, "Ngozi", nil, nil)
+	if err != nil {
+		t.Fatalf("seed customer: %v", err)
+	}
+
+	v := ai.NewValidator(customers)
+	lastID := existing.ID
+	action, err := v.Validate(context.Background(), userID, ai.RawIntent{
+		Intent:       ai.IntentCreateDebt,
+		CustomerName: new("Ngozi"),
+		AmountMinor:  new(int64(1000000)),
+		Confidence:   ai.ConfidenceHigh,
+		Language:     ai.LangEnglish,
+	}, ai.ContextHint{LastCustomerID: &lastID})
 	if err != nil {
 		t.Fatalf("Validate: %v", err)
 	}

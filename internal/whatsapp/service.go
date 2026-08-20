@@ -131,6 +131,24 @@ func (s *Service) recordOutbound(ctx context.Context, to, providerMessageID, mes
 	return err
 }
 
+// SendTemplate sends a Meta-approved WhatsApp template message and
+// durably records it as an outbound message, mirroring SendText —
+// required for reminders (docs/BRIEF-fixes-and-reminders.md #4): the
+// customer has never messaged Ruby, so this is a business-initiated
+// conversation from message one, which the Cloud API only allows via an
+// approved template, never freeform text.
+func (s *Service) SendTemplate(ctx context.Context, to, templateName, languageCode string, bodyParams []string) (string, error) {
+	id, err := sendTemplate(ctx, s.accessToken, s.phoneNumberID, to, templateName, languageCode, bodyParams)
+	if err != nil {
+		return "", err
+	}
+	body := fmt.Sprintf("[template:%s]", templateName)
+	if err := s.recordOutbound(ctx, to, id, "template", body); err != nil {
+		return "", err
+	}
+	return id, nil
+}
+
 // DownloadMedia fetches the bytes behind a WhatsApp media id (spec §22).
 func (s *Service) DownloadMedia(ctx context.Context, mediaID string) ([]byte, string, error) {
 	return downloadMedia(ctx, s.accessToken, mediaID)
