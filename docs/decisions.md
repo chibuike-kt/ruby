@@ -58,3 +58,24 @@ something concrete contradicts them during implementation.
    conversational-context cache from docs/BRIEF-api-redis.md) so an
    immediate follow-up message doesn't force them through the same
    disambiguation again.
+9. **Name match to exactly one existing customer, no other signal
+   (extends #8; docs/BRIEF-fixes-and-reminders.md #3)** — #8 covers
+   *multiple* candidates; this covers the adjacent gap: `CREATE_DEBT`
+   or `RECORD_PAYMENT` names a customer whose bare name matches
+   *exactly one* existing customer, and nothing else confirms it's
+   them. Silently resolving is the same guess spec §11 forbids, just at
+   one match instead of many; silently treating it as a new person
+   risks the indistinguishable duplicate #8 already guards against.
+   Precise trigger condition: the reference resolved via bare name (no
+   phone/alias/explicit-disambiguation signal, no `hint.ResolvedCustomerID`)
+   to exactly one existing customer, and that customer's id doesn't
+   already match `hint.LastCustomerID` (spec §8 signal 4 — recent
+   conversational context, which *does* corroborate it without asking
+   again). GET_CUSTOMER_BALANCE and other read-only intents are exempt
+   — nothing to misattribute. On trigger, ask: "You already have a
+   customer named X. Is this the same X, or someone new?" — Same
+   resolves to the existing customer and proceeds; New enters #8's
+   creation guard (ask for a phone number or alias) before creating a
+   same-named record, then proceeds against the new one. Same
+   pending-state mechanism as #8's disambiguation, not new
+   infrastructure.
