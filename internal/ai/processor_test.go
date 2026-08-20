@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
@@ -248,6 +249,47 @@ func TestProcessor_DebtCreated_OutstandingEqualsFullAmount(t *testing.T) {
 	}
 	if *input.OutstandingMinor != wantAmountMinor {
 		t.Fatalf("got outstanding_minor %d, want %d (the full amount — nothing's been paid yet)", *input.OutstandingMinor, wantAmountMinor)
+	}
+}
+
+// TestProcessor_CreateDebt_NoDueDate_Succeeds is
+// docs/BRIEF-critical-fixes-and-reminders.md #1a end to end: a debt
+// message with no due date at all must actually commit a debt row, not
+// fail and not invent a date. Verified against the real database, not
+// just the phrase input the earlier outstanding-amount tests check.
+func TestProcessor_CreateDebt_NoDueDate_Succeeds(t *testing.T) {
+	pool := dbtest.Open(t)
+	rdb := dbtest.OpenRedis(t)
+	userID := dbtest.CreateUser(t, pool, "+2348050000099")
+
+	extractor := &fakeExtractor{results: []ai.RawIntent{
+		{Intent: ai.IntentCreateDebt, CustomerName: new("Chinedu"), AmountMinor: new(int64(5000000)), Confidence: ai.ConfidenceHigh, Language: ai.LangEnglish},
+	}}
+	phraser := &fakePhraser{}
+	sender := &fakeSender{}
+	p := newTestProcessor(pool, rdb, extractor, phraser, sender)
+
+	msg := ai.ToInboundMessage(userID, "wamid.nodue.1", "text", new("Chinedu owes me 50k"))
+	reply, err := p.Handle(context.Background(), msg)
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if phraser.last().Event != ai.EventDebtCreated {
+		t.Fatalf("got reply %q (event %v), want a successful EventDebtCreated phrase", reply.Text, phraser.last().Event)
+	}
+
+	var dueDate *time.Time
+	var count int
+	if err := pool.QueryRow(context.Background(),
+		`SELECT count(*), max(due_date) FROM debts WHERE user_id = $1`, userID,
+	).Scan(&count, &dueDate); err != nil {
+		t.Fatalf("query debt: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("got %d debts, want 1 — debt creation must succeed with no due date", count)
+	}
+	if dueDate != nil {
+		t.Fatalf("got due date %v, want nil — never invent one", dueDate)
 	}
 }
 

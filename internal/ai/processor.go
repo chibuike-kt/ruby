@@ -10,11 +10,13 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 
 	"github.com/chibuike-kt/ruby/internal/account"
 	"github.com/chibuike-kt/ruby/internal/customer"
+	"github.com/chibuike-kt/ruby/internal/db"
 	"github.com/chibuike-kt/ruby/internal/debt"
 	"github.com/chibuike-kt/ruby/internal/ledger"
 	"github.com/chibuike-kt/ruby/internal/payment"
@@ -168,6 +170,20 @@ func (p *Processor) process(ctx context.Context, msg InboundMessage, acct accoun
 		return p.handleInteractive(ctx, msg, pending, hasPending)
 	}
 
+	// Interactive slot-filling edge case #4 (docs/BRIEF-critical-fixes-
+	// and-reminders.md): "never mind"/"cancel"/equivalents must cleanly
+	// exit *any* pending state, checked once here rather than per-flow.
+	// Deterministic, no AI call — same reasoning as greeting detection.
+	if hasPending {
+		if cancelText, err := p.rawText(ctx, msg); err == nil && isCancelPhrase(cancelText) {
+			if clearErr := ClearPendingAction(ctx, p.cfg.Redis, msg.UserID); clearErr != nil {
+				p.logf("failed to clear pending action", "error", clearErr)
+			}
+			lang := stickyOrPendingLanguage(pending)
+			return textReply(fixedText(cancelledText, lang)), lang, nil
+		}
+	}
+
 	if hasPending && pending.Kind == PendingDisambiguateCustomer {
 		return p.handleDisambiguationReply(ctx, msg, pending)
 	}
@@ -185,6 +201,16 @@ func (p *Processor) process(ctx context.Context, msg InboundMessage, acct accoun
 	// the customer-signal step above.
 	if hasPending && pending.Kind == PendingAwaitingReminderPhone {
 		return p.handleReminderPhoneReply(ctx, msg, pending)
+	}
+
+	// Interactive slot-filling (docs/BRIEF-critical-fixes-and-
+	// reminders.md): unlike the deterministic flows above, this one
+	// does its own text resolution and (usually) its own extractor
+	// call — a slot-fill reply can carry real, ambiguous natural
+	// language (edge cases #2/#3/#5/#6), not just a phone number or a
+	// button id.
+	if hasPending && pending.Kind == PendingSlotFill {
+		return p.handleSlotFillReply(ctx, msg, pending)
 	}
 
 	text, detectedLang, err := p.resolveText(ctx, msg)
@@ -220,6 +246,12 @@ func (p *Processor) process(ctx context.Context, msg InboundMessage, acct accoun
 	if isSupportedLanguage(detectedLang) {
 		raw.Language = detectedLang
 	}
+	// docs/BRIEF-critical-fixes-and-reminders.md #2b: once a language is
+	// established for this conversation, a short/ambiguous reply (an
+	// amount, a bare name, "yes") must not re-detect and flip it —
+	// only a message with enough content to genuinely signal a change
+	// does.
+	raw.Language = p.resolveStickyLanguage(ctx, msg.UserID, text, raw.Language)
 	lang := raw.Language
 
 	if hasPending && pending.Kind == PendingConfirm {
@@ -246,6 +278,33 @@ func (p *Processor) process(ctx context.Context, msg InboundMessage, acct accoun
 		return textReply(fixedText(nothingToConfirmText, lang)), lang, nil
 	case IntentHelp:
 		return textReply(fixedText(helpText, lang)), lang, nil
+	case IntentSmallTalk:
+		// docs/BRIEF-critical-fixes-and-reminders.md #3a: brief and
+		// warm, never the capability-list fallback.
+		return textReply(fixedText(smallTalkText, lang)), lang, nil
+	case IntentSelfQuery:
+		// #3b: answered straight from users.name, never a decline.
+		return textReply(fmt.Sprintf(fixedText(selfQueryNameText, lang), acct.Name)), lang, nil
+	}
+
+	// Interactive slot-filling: CREATE_DEBT/RECORD_PAYMENT missing a
+	// required field (customer identity or amount) never fails and
+	// never guesses — it asks, and only reaches the backend once
+	// every required field is present (docs/BRIEF-critical-fixes-and-
+	// reminders.md). hint has to be checked here (not just inside
+	// Validate) so a pronoun-resolvable customer never triggers an
+	// unnecessary "who is this for?" — validateAndExecute below
+	// re-fetches its own copy, one extra Redis read for the common
+	// case, in exchange for not threading hint through every call.
+	if requiredSlotFields(raw.Intent) != nil {
+		hint, err := p.contextHint(ctx, msg.UserID)
+		if err != nil {
+			return Reply{}, lang, err
+		}
+		if missing := missingSlotFields(raw, hint); len(missing) > 0 {
+			reply, err := p.beginSlotFill(ctx, msg.UserID, raw, missing)
+			return reply, lang, err
+		}
 	}
 
 	reply, err := p.validateAndExecute(ctx, msg, raw)
@@ -787,7 +846,12 @@ func (p *Processor) execute(ctx context.Context, msg InboundMessage, raw RawInte
 	case HelpAction:
 		return textReply(fixedText(helpText, raw.Language)), nil
 	case UnsupportedAction:
-		return textReply(fixedText(reminderUnsupportedText, raw.Language)), nil
+		// docs/BRIEF-critical-fixes-and-reminders.md #1c: an honest
+		// decline plus the real capability list — never
+		// reminderUnsupportedText, which is specific to the
+		// recognized-but-not-yet-built reminder intents (those never
+		// reach here at all; see process()'s own switch).
+		return textReply(fixedText(unsupportedRequestText, raw.Language)), nil
 	default:
 		return Reply{}, fmt.Errorf("ai: unknown action type %T", action)
 	}
@@ -798,12 +862,33 @@ func (p *Processor) executeCreateDebt(ctx context.Context, msg InboundMessage, r
 		return p.beginConfirmation(ctx, msg, raw)
 	}
 
-	customerID, customerName, err := p.resolveOrCreateCustomer(ctx, msg.UserID, a.Customer)
-	if err != nil {
-		return Reply{}, err
-	}
-
-	d, err := p.cfg.Debts.Create(ctx, msg.UserID, customerID, a.Amount, a.Description, a.DueDate)
+	// Customer resolution/creation and the debt (+ledger) write happen
+	// in one transaction (docs/BRIEF-critical-fixes-and-reminders.md
+	// #1b): without this, a customer auto-created for a name that
+	// doesn't exist yet commits immediately, and any failure in the
+	// debt write that follows — a bad amount, a DB error, anything —
+	// orphans that customer row. Mirrors the atomicity
+	// payment.Service.Record already has for its own multi-write
+	// sequence.
+	var d debt.Debt
+	var customerID int64
+	var customerName string
+	err := db.WithTx(ctx, p.cfg.Pool, func(ctx context.Context, tx pgx.Tx) error {
+		var err error
+		customerID, customerName, err = p.resolveOrCreateCustomer(ctx, tx, msg.UserID, a.Customer)
+		if err != nil {
+			return err
+		}
+		d, err = debt.CreateWithLedger(ctx, tx, debt.Debt{
+			UserID:      msg.UserID,
+			CustomerID:  customerID,
+			Amount:      a.Amount,
+			Description: a.Description,
+			DueDate:     a.DueDate,
+			Status:      debt.StatusOutstanding,
+		})
+		return err
+	})
 	if err != nil {
 		return Reply{}, err
 	}
@@ -832,6 +917,19 @@ func (p *Processor) executeCreateDebt(ctx context.Context, msg InboundMessage, r
 	}
 	reply := textReply(text)
 
+	// Automatic trader reminders (docs/BRIEF-critical-fixes-and-
+	// reminders.md's full reminder system): scheduled unconditionally
+	// whenever a debt has a due date — this is the trader's own data
+	// reflected back to them, no opt-in question, unlike the customer
+	// reminder flow just below. A scheduling failure here is logged,
+	// never surfaced to the trader or allowed to affect the debt-
+	// created confirmation that already succeeded.
+	if p.cfg.Reminders != nil && d.DueDate != nil {
+		if _, err := p.cfg.Reminders.ScheduleTraderReminders(ctx, d.ID, msg.UserID, *d.DueDate); err != nil {
+			p.logf("failed to schedule automatic trader reminders", "error", err)
+		}
+	}
+
 	// The reminder opt-in question only makes sense with a due date to
 	// count down to (docs/BRIEF-fixes-and-reminders.md #4) — combined
 	// into this same confirmation message, not a separate follow-up
@@ -850,16 +948,20 @@ func (p *Processor) executeCreateDebt(ctx context.Context, msg InboundMessage, r
 	return reply, nil
 }
 
-func (p *Processor) resolveOrCreateCustomer(ctx context.Context, userID int64, ref CustomerRef) (int64, string, error) {
+// resolveOrCreateCustomer takes a db.Querier rather than always using
+// p.cfg.Pool so a caller already inside a transaction (executeCreateDebt,
+// docs/BRIEF-critical-fixes-and-reminders.md #1b) can pass its own tx —
+// both *pgxpool.Pool and pgx.Tx satisfy db.Querier.
+func (p *Processor) resolveOrCreateCustomer(ctx context.Context, q db.Querier, userID int64, ref CustomerRef) (int64, string, error) {
 	if ref.ExistingID != nil {
-		c, err := customer.GetByID(ctx, p.cfg.Pool, userID, *ref.ExistingID)
+		c, err := customer.GetByID(ctx, q, userID, *ref.ExistingID)
 		if err != nil {
 			return 0, "", err
 		}
 		return c.ID, c.Name, nil
 	}
 	if ref.NewName != nil {
-		c, err := p.cfg.Customers.Create(ctx, userID, *ref.NewName, nil, nil)
+		c, err := customer.CreateChecked(ctx, q, userID, *ref.NewName, nil, nil)
 		if err != nil {
 			return 0, "", err
 		}
@@ -1014,17 +1116,25 @@ func (p *Processor) executeGetCustomerBalance(ctx context.Context, msg InboundMe
 	return textReply(text), err
 }
 
+// executeListCustomers is built deterministically in Go, not phrased by
+// the AI (docs/BRIEF-critical-fixes-and-reminders.md #2a) — an empty
+// customer list left the Phraser to improvise a "stub response with no
+// content" (Items omitted from the JSON entirely via omitempty), the
+// same class of bug LIST_OUTSTANDING_DEBTS's own deterministic
+// formatting already guards against.
 func (p *Processor) executeListCustomers(ctx context.Context, msg InboundMessage, raw RawIntent) (Reply, error) {
 	customers, err := customer.ListByUser(ctx, p.cfg.Pool, msg.UserID)
 	if err != nil {
 		return Reply{}, err
 	}
-	items := make([]string, len(customers))
-	for i, c := range customers {
-		items[i] = c.Name
+	if len(customers) == 0 {
+		return textReply(fixedText(noCustomersText, raw.Language)), nil
 	}
-	text, err := p.phrase(ctx, PhraseInput{Event: EventCustomerList, Language: raw.Language, Items: items})
-	return textReply(text), err
+	names := make([]string, len(customers))
+	for i, c := range customers {
+		names[i] = c.Name
+	}
+	return textReply(formatCustomerList(names, raw.Language)), nil
 }
 
 // executeListOutstandingDebts is built deterministically in Go, not
