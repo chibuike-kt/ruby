@@ -76,11 +76,13 @@ func NewValidator(customers *customer.Service) *Validator {
 // *customer.AmbiguousError, unmodified, so Processor can turn it into a
 // pending disambiguation (see pending.go). CONFIRM_ACTION and
 // CREATE_REMINDER/CANCEL_REMINDER are intercepted by Processor before
-// reaching here (see processor.go); an intent Validate doesn't otherwise
-// recognize falls back to UnsupportedAction rather than erroring, since a
-// model producing an intent string outside the schema's enum should never
-// be possible under strict Structured Outputs, but "should never happen"
-// isn't "must crash."
+// reaching here (see processor.go). IntentUnsupported
+// (docs/BRIEF-critical-fixes-and-reminders.md #1c) is the model's own
+// explicit "this doesn't match anything I do" signal — routed to
+// UnsupportedAction exactly like the default case, so both a genuinely
+// unsupported request and (should it ever happen) an intent string
+// outside the schema's enum get the same honest decline rather than a
+// crash or an improvised flow.
 func (v *Validator) Validate(ctx context.Context, userID int64, raw RawIntent, hint ContextHint) (Action, error) {
 	switch raw.Intent {
 	case IntentCreateDebt:
@@ -100,6 +102,10 @@ func (v *Validator) Validate(ctx context.Context, userID int64, raw RawIntent, h
 	case IntentHelp:
 		return HelpAction{}, nil
 	default:
+		// IntentUnsupported lands here too — it's the model's own
+		// explicit "this doesn't match anything I do" signal, handled
+		// identically to a genuinely-impossible unrecognized intent
+		// string: both get UnsupportedAction's honest decline.
 		return UnsupportedAction{Intent: raw.Intent}, nil
 	}
 }

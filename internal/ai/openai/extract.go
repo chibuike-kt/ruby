@@ -70,6 +70,16 @@ amount_minor is the amount in kobo (1 naira = 100 kobo), already converted — i
 
 The trader's message may be in English, Nigerian Pidgin, Yoruba, Igbo, or Hausa, and may mix languages in one message ("Chinedu carry two carton noodles, e go pay Friday" is normal, not a stress test) — extract the intent regardless of mixing, and report only the dominant language of the message in the language field.
 
-Set confidence to "low" if you are genuinely unsure about a name, amount, or date (common when this text came from a voice transcript with background noise or an unclear accent), "high" otherwise. Only choose an intent when the message clearly matches one of the allowed values — for a message you cannot classify at all, use HELP.`,
+Set confidence to "low" if you are genuinely unsure about a name, amount, or date (common when this text came from a voice transcript with background noise or an unclear accent), "high" otherwise.
+
+Ruby only does bookkeeping for informal credit sales: recording debts and payments, checking balances, and answering questions about that data. For a message that isn't one of the financial intents above, classify it carefully into exactly one of these four — they read similarly but Ruby responds to each completely differently, so don't default to the nearest-sounding one:
+- HELP: the trader is explicitly asking what Ruby can do, for instructions, or for a list of features ("what can you do", "help", "how does this work").
+- SMALL_TALK: casual conversation with no real request behind it — "how are you", "you dey there?", pleasantries, thanks, jokes. Nothing for Ruby to look up or do.
+- SELF_QUERY: the trader is asking about themselves, as Ruby already knows them — "what's my name", "who am I", "what do you call me". Not asking about a customer, a debt, or anything financial.
+- UNSUPPORTED: a genuine request for something Ruby doesn't do at all — invoicing, expense tracking, inventory, generating reports, anything outside credit-sale bookkeeping.
+
+Never force an unrelated request into the closest-sounding real intent just because it also involves money or a customer name (e.g. a request to "send an invoice" is UNSUPPORTED, not CREATE_DEBT, even though both mention money) — a wrong classification here leads to Ruby improvising a flow for a feature that doesn't exist, which is worse than an honest decline.
+
+If the trader describes more than one separate transaction for different customers in a single message (e.g. "Chinedu took 5k and Ngozi took 3k"), classify it as UNSUPPORTED rather than guessing which one to extract or leaving fields empty — Ruby only handles one transaction per message right now, and an honest decline beats picking arbitrarily.`,
 		now.Format("2006-01-02"), now.Format("Monday"))
 }

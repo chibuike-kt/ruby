@@ -19,7 +19,8 @@ var allIntents = []string{
 	string(IntentCreateDebt), string(IntentRecordPayment), string(IntentListCustomers),
 	string(IntentGetCustomerBalance), string(IntentListOutstandingDebts), string(IntentGetTotalOutstanding),
 	string(IntentGetPaymentSummary), string(IntentCreateReminder), string(IntentCancelReminder),
-	string(IntentConfirmAction), string(IntentHelp),
+	string(IntentConfirmAction), string(IntentHelp), string(IntentUnsupported),
+	string(IntentSmallTalk), string(IntentSelfQuery),
 }
 
 var allLanguages = []string{
