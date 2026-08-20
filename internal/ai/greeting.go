@@ -97,6 +97,20 @@ func greetingReply(lang Language) Reply {
 	return Reply{Text: fixedText(greetingText, lang), Buttons: greetingMenuButtons()}
 }
 
+// helpReply and unsupportedReply attach the same three quick-action
+// buttons as the greeting menu (docs/BRIEF-polish-and-hardening.md #3:
+// "for visual consistency every time this content appears, not just on
+// first contact") to every path that shows the capability list — HELP,
+// the honest decline for an unsupported request, and the greeting
+// menu's own Help button (which reaches helpReply the same way).
+func helpReply(lang Language) Reply {
+	return Reply{Text: fixedText(helpText, lang), Buttons: greetingMenuButtons()}
+}
+
+func unsupportedReply(lang Language) Reply {
+	return Reply{Text: fixedText(unsupportedRequestText, lang), Buttons: greetingMenuButtons()}
+}
+
 // returningGreetingReply is section 2's fix: a trader who already has a
 // name (docs/BRIEF-response-quality.md #1/#2) gets a short, warm
 // acknowledgment by name instead of the full intro every time — "it

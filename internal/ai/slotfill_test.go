@@ -384,3 +384,139 @@ func TestProcessor_SlotFill_AllFiveLanguages(t *testing.T) {
 		})
 	}
 }
+
+// TestProcessor_SlotFill_QuestionHasCancelButton is docs/BRIEF-polish-
+// and-hardening.md #3's slot-filling addition: the question itself stays
+// free text, but a single Cancel button rides alongside it.
+func TestProcessor_SlotFill_QuestionHasCancelButton(t *testing.T) {
+	pool := dbtest.Open(t)
+	rdb := dbtest.OpenRedis(t)
+	userID := dbtest.CreateUser(t, pool, "+2348160000010")
+
+	extractor := &fakeExtractor{results: []ai.RawIntent{
+		{Intent: ai.IntentCreateDebt, Confidence: ai.ConfidenceHigh, Language: ai.LangEnglish},
+	}}
+	phraser := &fakePhraser{}
+	sender := &fakeSender{}
+	p := newTestProcessor(pool, rdb, extractor, phraser, sender)
+
+	reply, err := p.Handle(context.Background(), ai.ToInboundMessage(userID, "wamid.slot9.1", "text", new("someone took goods")))
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if len(reply.Buttons) != 1 || reply.Buttons[0].ID != "cancel" {
+		t.Fatalf("got buttons %+v, want exactly one Cancel button (id \"cancel\")", reply.Buttons)
+	}
+}
+
+// TestProcessor_SlotFill_CancelButtonTapExits is the button-tap
+// counterpart to TestProcessor_SlotFill_CancelExits (free text) — a tap
+// on the Cancel button attached to a slot-fill question must clear the
+// pending state exactly like typing "cancel" already does.
+func TestProcessor_SlotFill_CancelButtonTapExits(t *testing.T) {
+	pool := dbtest.Open(t)
+	rdb := dbtest.OpenRedis(t)
+	userID := dbtest.CreateUser(t, pool, "+2348160000011")
+
+	extractor := &fakeExtractor{results: []ai.RawIntent{
+		{Intent: ai.IntentCreateDebt, Confidence: ai.ConfidenceHigh, Language: ai.LangEnglish},
+	}}
+	phraser := &fakePhraser{}
+	sender := &fakeSender{}
+	p := newTestProcessor(pool, rdb, extractor, phraser, sender)
+
+	if _, err := p.Handle(context.Background(), ai.ToInboundMessage(userID, "wamid.slot10.1", "text", new("someone took goods"))); err != nil {
+		t.Fatalf("Handle (missing both): %v", err)
+	}
+
+	reply, err := p.Handle(context.Background(), ai.ToInboundMessage(userID, "wamid.slot10.2", "interactive", new("cancel")))
+	if err != nil {
+		t.Fatalf("Handle (cancel button tap): %v", err)
+	}
+	if !strings.Contains(strings.ToLower(reply.Text), "cancel") {
+		t.Fatalf("got reply %q, want a cancellation acknowledgment", reply.Text)
+	}
+	if _, ok, err := ai.GetPendingAction(context.Background(), rdb, userID); err != nil || ok {
+		t.Fatalf("got a pending action still set (ok=%v err=%v), want cleared", ok, err)
+	}
+	if got := countRows(t, pool, `SELECT count(*) FROM debts WHERE user_id = $1`, userID); got != 0 {
+		t.Fatalf("got %d debts, want 0 — cancelling must not create anything", got)
+	}
+}
+
+// TestProcessor_SlotFill_OverpaymentConfirmation_HasButtons is docs/
+// BRIEF-polish-and-hardening.md #3's audit item: overpayment
+// confirmation (Confirm/Edit/Cancel) must still apply correctly to a
+// record completed via slot-filling, not only a fully-parsed
+// single-message record. A RECORD_PAYMENT missing the amount is
+// slot-filled first; the reply that finally supplies the amount
+// triggers the same overpayment path executeRecordPayment already has
+// for a single-message record.
+func TestProcessor_SlotFill_OverpaymentConfirmation_HasButtons(t *testing.T) {
+	pool := dbtest.Open(t)
+	rdb := dbtest.OpenRedis(t)
+	userID := dbtest.CreateUser(t, pool, "+2348160000012")
+	customers := customer.NewService(pool)
+	debts := debt.NewService(pool)
+
+	c, err := customers.Create(context.Background(), userID, "Ngozi", nil, nil)
+	if err != nil {
+		t.Fatalf("seed customer: %v", err)
+	}
+	if _, err := debts.Create(context.Background(), userID, c.ID, money.New(7500000, money.NGN), "rice", nil); err != nil {
+		t.Fatalf("seed debt: %v", err)
+	}
+	if err := customer.SetLastCustomerContext(context.Background(), rdb, userID, c.ID, customer.DefaultLastCustomerContextTTL); err != nil {
+		t.Fatalf("seed last customer context: %v", err)
+	}
+
+	extractor := &fakeExtractor{results: []ai.RawIntent{
+		{Intent: ai.IntentRecordPayment, CustomerName: new("Ngozi"), Confidence: ai.ConfidenceHigh, Language: ai.LangEnglish}, // amount missing
+		{Intent: ai.IntentRecordPayment, AmountMinor: new(int64(10000000)), Confidence: ai.ConfidenceHigh, Language: ai.LangEnglish},
+	}}
+	phraser := &fakePhraser{}
+	sender := &fakeSender{}
+	p := newTestProcessor(pool, rdb, extractor, phraser, sender)
+
+	askAmount, err := p.Handle(context.Background(), ai.ToInboundMessage(userID, "wamid.slot11.1", "text", new("Ngozi paid me")))
+	if err != nil {
+		t.Fatalf("Handle (missing amount): %v", err)
+	}
+	if !strings.Contains(strings.ToLower(askAmount.Text), "how much") {
+		t.Fatalf("got reply %q, want the slot-fill amount question", askAmount.Text)
+	}
+
+	overpayPrompt, err := p.Handle(context.Background(), ai.ToInboundMessage(userID, "wamid.slot11.2", "text", new("100k")))
+	if err != nil {
+		t.Fatalf("Handle (fill amount, overpayment): %v", err)
+	}
+	if phraser.last().Event != ai.EventOverpaymentPrompt {
+		t.Fatalf("got phrase event %v, want EventOverpaymentPrompt — the amount that completed the slot-fill must still hit the overpayment path", phraser.last().Event)
+	}
+	if len(overpayPrompt.Buttons) != 3 {
+		t.Fatalf("got %d buttons on the overpayment prompt, want 3 (Confirm/Edit/Cancel), same as a fully-parsed single-message record", len(overpayPrompt.Buttons))
+	}
+	wantIDs := map[string]bool{"confirm": true, "edit": true, "cancel": true}
+	for _, b := range overpayPrompt.Buttons {
+		if !wantIDs[b.ID] {
+			t.Fatalf("got unexpected button id %q, want one of confirm/edit/cancel", b.ID)
+		}
+	}
+	if got := countRows(t, pool, `SELECT count(*) FROM payments`); got != 0 {
+		t.Fatalf("got %d payments before confirmation, want 0", got)
+	}
+
+	if _, err := p.Handle(context.Background(), ai.ToInboundMessage(userID, "wamid.slot11.3", "interactive", new("confirm"))); err != nil {
+		t.Fatalf("Handle (confirm overpayment): %v", err)
+	}
+	var amountMinor int64
+	err = pool.QueryRow(context.Background(),
+		`SELECT amount_minor FROM payments WHERE debt_id = (SELECT id FROM debts WHERE customer_id = $1)`, c.ID,
+	).Scan(&amountMinor)
+	if err != nil {
+		t.Fatalf("query payment: %v", err)
+	}
+	if amountMinor != 7500000 {
+		t.Fatalf("got payment amount %d, want 7500000 (outstanding, not the 10000000 attempted)", amountMinor)
+	}
+}

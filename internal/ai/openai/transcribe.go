@@ -62,14 +62,17 @@ func (t *Transcriber) Transcribe(ctx context.Context, audio []byte) (string, ai.
 		return "", "", err
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/audio/transcriptions", &body)
-	if err != nil {
-		return "", "", err
-	}
-	req.Header.Set("Content-Type", w.FormDataContentType())
-	req.Header.Set("Authorization", "Bearer "+t.apiKey)
-
-	resp, err := httpClient.Do(req)
+	bodyBytes := body.Bytes()
+	contentType := w.FormDataContentType()
+	resp, err := doWithRetry(ctx, func() (*http.Request, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/audio/transcriptions", bytes.NewReader(bodyBytes))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Content-Type", contentType)
+		req.Header.Set("Authorization", "Bearer "+t.apiKey)
+		return req, nil
+	})
 	if err != nil {
 		return "", "", err
 	}

@@ -29,6 +29,46 @@ const maxMediaResponseBytes = 1 << 20
 // — no point buffering a voice note the transcription call would reject anyway.
 const maxMediaBytes = 25 << 20
 
+// retryBackoff is docs/BRIEF-polish-and-hardening.md #4's outbound
+// retry/backoff requirement: up to len(retryBackoff) retries (3 attempts
+// total) on a transient failure — a network error, 429, or 5xx — each
+// wait a little longer than the last. A genuine client error (any other
+// 4xx) is never retried: retrying can't fix a malformed request, and for
+// a message-send call it would risk delivering the same message twice.
+var retryBackoff = []time.Duration{200 * time.Millisecond, 500 * time.Millisecond}
+
+// doWithRetry executes newReq's request, retrying on a transient
+// failure. newReq is called fresh on every attempt (an http.Request's
+// body reader is single-use, so a retry needs a brand new one, not the
+// same request replayed).
+func doWithRetry(ctx context.Context, newReq func() (*http.Request, error)) (*http.Response, error) {
+	var lastErr error
+	for attempt := 0; ; attempt++ {
+		req, err := newReq()
+		if err != nil {
+			return nil, err
+		}
+		resp, err := httpClient.Do(req)
+		if err == nil && resp.StatusCode != http.StatusTooManyRequests && resp.StatusCode < 500 {
+			return resp, nil
+		}
+		if err != nil {
+			lastErr = err
+		} else {
+			lastErr = fmt.Errorf("whatsapp: transient failure with status %d", resp.StatusCode)
+			_ = resp.Body.Close()
+		}
+		if attempt >= len(retryBackoff) {
+			return nil, lastErr
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(retryBackoff[attempt]):
+		}
+	}
+}
+
 type sendTextRequest struct {
 	MessagingProduct string          `json:"messaging_product"`
 	To               string          `json:"to"`
@@ -260,14 +300,15 @@ func sendTemplate(ctx context.Context, accessToken, phoneNumberID, to, templateN
 // marshaled body differs between them.
 func postMessage(ctx context.Context, accessToken, phoneNumberID string, reqBody []byte) (string, error) {
 	url := fmt.Sprintf("%s/%s/messages", graphAPIBaseURL, phoneNumberID)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(reqBody))
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+accessToken)
-
-	resp, err := httpClient.Do(req)
+	resp, err := doWithRetry(ctx, func() (*http.Request, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(reqBody))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+accessToken)
+		return req, nil
+	})
 	if err != nil {
 		return "", err
 	}
@@ -291,6 +332,57 @@ func postMessage(ctx context.Context, accessToken, phoneNumberID string, reqBody
 	return parsed.Messages[0].ID, nil
 }
 
+type markReadRequest struct {
+	MessagingProduct string          `json:"messaging_product"`
+	Status           string          `json:"status"`
+	MessageID        string          `json:"message_id"`
+	TypingIndicator  typingIndicator `json:"typing_indicator"`
+}
+
+type typingIndicator struct {
+	Type string `json:"type"`
+}
+
+// markReadWithTyping posts the combined read-receipt + typing-indicator
+// call (docs/BRIEF-polish-and-hardening.md #1) — Meta's own single-call
+// shape, confirmed current: no separate "typing on" call exists. The
+// indicator auto-dismisses after 25s or the real reply, whichever comes
+// first, so there's nothing to re-trigger or clean up here.
+func markReadWithTyping(ctx context.Context, accessToken, phoneNumberID, messageID string) error {
+	reqBody, err := json.Marshal(markReadRequest{
+		MessagingProduct: "whatsapp",
+		Status:           "read",
+		MessageID:        messageID,
+		TypingIndicator:  typingIndicator{Type: "text"},
+	})
+	if err != nil {
+		return err
+	}
+
+	url := fmt.Sprintf("%s/%s/messages", graphAPIBaseURL, phoneNumberID)
+	resp, err := doWithRetry(ctx, func() (*http.Request, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(reqBody))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+accessToken)
+		return req, nil
+	})
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if _, err := io.Copy(io.Discard, io.LimitReader(resp.Body, maxMediaResponseBytes)); err != nil {
+		return err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("whatsapp: mark read failed with status %d", resp.StatusCode)
+	}
+	return nil
+}
+
 type mediaMetaResponse struct {
 	URL      string `json:"url"`
 	MimeType string `json:"mime_type"`
@@ -302,13 +394,14 @@ type mediaMetaResponse struct {
 // the download because Meta's CDN still checks it on the handed-back URL.
 func downloadMedia(ctx context.Context, accessToken, mediaID string) ([]byte, string, error) {
 	metaURL := fmt.Sprintf("%s/%s", graphAPIBaseURL, mediaID)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, metaURL, nil)
-	if err != nil {
-		return nil, "", err
-	}
-	req.Header.Set("Authorization", "Bearer "+accessToken)
-
-	resp, err := httpClient.Do(req)
+	resp, err := doWithRetry(ctx, func() (*http.Request, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, metaURL, nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Authorization", "Bearer "+accessToken)
+		return req, nil
+	})
 	if err != nil {
 		return nil, "", err
 	}
@@ -329,13 +422,14 @@ func downloadMedia(ctx context.Context, accessToken, mediaID string) ([]byte, st
 		return nil, "", fmt.Errorf("whatsapp: media lookup returned no url")
 	}
 
-	dlReq, err := http.NewRequestWithContext(ctx, http.MethodGet, meta.URL, nil)
-	if err != nil {
-		return nil, "", err
-	}
-	dlReq.Header.Set("Authorization", "Bearer "+accessToken)
-
-	dlResp, err := httpClient.Do(dlReq)
+	dlResp, err := doWithRetry(ctx, func() (*http.Request, error) {
+		dlReq, err := http.NewRequestWithContext(ctx, http.MethodGet, meta.URL, nil)
+		if err != nil {
+			return nil, err
+		}
+		dlReq.Header.Set("Authorization", "Bearer "+accessToken)
+		return dlReq, nil
+	})
 	if err != nil {
 		return nil, "", err
 	}

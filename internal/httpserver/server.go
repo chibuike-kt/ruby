@@ -83,7 +83,7 @@ func NewRouter(s *Server) http.Handler {
 		r.Get("/ledger", s.listLedger)
 		r.Get("/summary", s.summary)
 
-		r.Patch("/credit-profile-sharing", s.setCreditProfileSharing)
+		r.With(rateLimited).Patch("/credit-profile-sharing", s.setCreditProfileSharing)
 	})
 
 	return r

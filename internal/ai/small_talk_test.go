@@ -30,7 +30,7 @@ func TestProcessor_SmallTalk_BriefWarmReply(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
-	if strings.Contains(reply.Text, "Record a debt") || strings.Contains(reply.Text, "can't do that yet") {
+	if strings.Contains(reply.Text, "Record a sale on credit") || strings.Contains(reply.Text, "can't do that yet") {
 		t.Fatalf("got reply %q, want a brief small-talk reply, not the capability list or a decline", reply.Text)
 	}
 	if reply.Text == "" {

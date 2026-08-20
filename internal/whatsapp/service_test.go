@@ -2,17 +2,37 @@ package whatsapp_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/chibuike-kt/ruby/internal/dbtest"
 	"github.com/chibuike-kt/ruby/internal/whatsapp"
 )
 
+// withStubGraphAPI points graphAPIBaseURL at a test server that accepts
+// any Cloud API call with a generic success response. Every ReceiveEvent
+// test needs this now that receiveMessage also fires a mark-read/
+// typing-indicator call (docs/BRIEF-polish-and-hardening.md #1) before
+// handing off to the AI pipeline — without a stub, that call would
+// otherwise reach the real Graph API during every test run.
+func withStubGraphAPI(t *testing.T) {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"success":true}`))
+	}))
+	t.Cleanup(srv.Close)
+	t.Cleanup(whatsapp.SetGraphAPIBaseURLForTest(srv.URL))
+}
+
 func newTestService(t *testing.T) *whatsapp.Service {
 	t.Helper()
+	withStubGraphAPI(t)
 	pool := dbtest.Open(t)
 	rdb := dbtest.OpenRedis(t)
 	return whatsapp.NewService(pool, rdb, "test-secret", "test-verify-token", "test-access-token", "test-phone-number-id", slog.Default())
@@ -100,6 +120,7 @@ func TestVerifyHandshake_WrongMode(t *testing.T) {
 }
 
 func TestReceiveEvent_KnownSender_TextMessage(t *testing.T) {
+	withStubGraphAPI(t)
 	pool := dbtest.Open(t)
 	rdb := dbtest.OpenRedis(t)
 	svc := whatsapp.NewService(pool, rdb, "test-secret", "test-verify-token", "test-access-token", "test-phone-number-id", slog.Default())
@@ -140,6 +161,7 @@ func TestReceiveEvent_KnownSender_TextMessage(t *testing.T) {
 }
 
 func TestReceiveEvent_KnownSender_AudioMessage_StoresMediaID(t *testing.T) {
+	withStubGraphAPI(t)
 	pool := dbtest.Open(t)
 	rdb := dbtest.OpenRedis(t)
 	svc := whatsapp.NewService(pool, rdb, "test-secret", "test-verify-token", "test-access-token", "test-phone-number-id", slog.Default())
@@ -169,6 +191,7 @@ func TestReceiveEvent_KnownSender_AudioMessage_StoresMediaID(t *testing.T) {
 }
 
 func TestReceiveEvent_PhoneNormalization_MissingPlus(t *testing.T) {
+	withStubGraphAPI(t)
 	pool := dbtest.Open(t)
 	rdb := dbtest.OpenRedis(t)
 	svc := whatsapp.NewService(pool, rdb, "test-secret", "test-verify-token", "test-access-token", "test-phone-number-id", slog.Default())
@@ -192,6 +215,7 @@ func TestReceiveEvent_PhoneNormalization_MissingPlus(t *testing.T) {
 // auto-creates the account (with an empty name; internal/ai's
 // name-capture flow fills it in) rather than requiring pre-registration.
 func TestReceiveEvent_NewPhoneNumber_AutoCreatesUser(t *testing.T) {
+	withStubGraphAPI(t)
 	pool := dbtest.Open(t)
 	svc := whatsapp.NewService(pool, dbtest.OpenRedis(t), "test-secret", "test-verify-token", "test-access-token", "test-phone-number-id", slog.Default())
 
@@ -233,6 +257,7 @@ func TestReceiveEvent_NewPhoneNumber_AutoCreatesUser(t *testing.T) {
 // TestReceiveEvent_ExistingPhoneNumber_DoesNotCreateSecondUser proves
 // auto-creation only kicks in on genuinely new numbers.
 func TestReceiveEvent_ExistingPhoneNumber_DoesNotCreateSecondUser(t *testing.T) {
+	withStubGraphAPI(t)
 	pool := dbtest.Open(t)
 	svc := whatsapp.NewService(pool, dbtest.OpenRedis(t), "test-secret", "test-verify-token", "test-access-token", "test-phone-number-id", slog.Default())
 	existingID := dbtest.CreateUser(t, pool, "+19995550001")
@@ -259,6 +284,7 @@ func TestReceiveEvent_ExistingPhoneNumber_DoesNotCreateSecondUser(t *testing.T) 
 }
 
 func TestReceiveEvent_Duplicate_SecondCallDoesNotCreateSecondRow(t *testing.T) {
+	withStubGraphAPI(t)
 	pool := dbtest.Open(t)
 	rdb := dbtest.OpenRedis(t)
 	svc := whatsapp.NewService(pool, rdb, "test-secret", "test-verify-token", "test-access-token", "test-phone-number-id", slog.Default())
@@ -301,6 +327,7 @@ func TestReceiveEvent_Duplicate_SecondCallDoesNotCreateSecondRow(t *testing.T) {
 // Postgres), Postgres's unique index is what actually prevents a
 // second row.
 func TestReceiveEvent_ConcurrentDuplicate_PostgresStillCatchesIt(t *testing.T) {
+	withStubGraphAPI(t)
 	pool := dbtest.Open(t)
 	rdb := dbtest.OpenRedis(t)
 	svc := whatsapp.NewService(pool, rdb, "test-secret", "test-verify-token", "test-access-token", "test-phone-number-id", slog.Default())
@@ -387,6 +414,7 @@ func TestReceiveEvent_NoMessagesInPayload_NoOutcomesNoError(t *testing.T) {
 }
 
 func TestReceiveEvent_UnsupportedMessageType_StoredWithoutContentReference(t *testing.T) {
+	withStubGraphAPI(t)
 	pool := dbtest.Open(t)
 	rdb := dbtest.OpenRedis(t)
 	svc := whatsapp.NewService(pool, rdb, "test-secret", "test-verify-token", "test-access-token", "test-phone-number-id", slog.Default())
@@ -411,6 +439,7 @@ func TestReceiveEvent_UnsupportedMessageType_StoredWithoutContentReference(t *te
 }
 
 func TestReceiveEvent_InteractiveButtonReply_StoresID(t *testing.T) {
+	withStubGraphAPI(t)
 	pool := dbtest.Open(t)
 	rdb := dbtest.OpenRedis(t)
 	svc := whatsapp.NewService(pool, rdb, "test-secret", "test-verify-token", "test-access-token", "test-phone-number-id", slog.Default())
@@ -443,6 +472,7 @@ func TestReceiveEvent_InteractiveButtonReply_StoresID(t *testing.T) {
 }
 
 func TestReceiveEvent_InteractiveListReply_StoresID(t *testing.T) {
+	withStubGraphAPI(t)
 	pool := dbtest.Open(t)
 	rdb := dbtest.OpenRedis(t)
 	svc := whatsapp.NewService(pool, rdb, "test-secret", "test-verify-token", "test-access-token", "test-phone-number-id", slog.Default())
@@ -464,5 +494,84 @@ func TestReceiveEvent_InteractiveListReply_StoresID(t *testing.T) {
 	}
 	if contentRef != "77" {
 		t.Fatalf("got content_reference %q, want the list_reply id \"77\"", contentRef)
+	}
+}
+
+// TestReceiveEvent_MarksReadWithTypingIndicator is docs/BRIEF-polish-
+// and-hardening.md #1's required test: a normal inbound message fires
+// the combined read-receipt/typing-indicator call, with the exact
+// payload shape Meta's Cloud API expects.
+func TestReceiveEvent_MarksReadWithTypingIndicator(t *testing.T) {
+	pool := dbtest.Open(t)
+	rdb := dbtest.OpenRedis(t)
+	dbtest.CreateUser(t, pool, "+16505551300")
+
+	var gotReqs []map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode request body: %v", err)
+		}
+		gotReqs = append(gotReqs, body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"success":true}`))
+	}))
+	t.Cleanup(srv.Close)
+	t.Cleanup(whatsapp.SetGraphAPIBaseURLForTest(srv.URL))
+
+	svc := whatsapp.NewService(pool, rdb, "test-secret", "test-verify-token", "test-access-token", "test-phone-number-id", slog.Default())
+	if _, err := svc.ReceiveEvent(context.Background(), textPayload("16505551300", "wamid.typing1", "hello")); err != nil {
+		t.Fatalf("ReceiveEvent: %v", err)
+	}
+
+	if len(gotReqs) != 1 {
+		t.Fatalf("got %d Graph API calls, want 1 (the mark-read/typing-indicator call)", len(gotReqs))
+	}
+	body := gotReqs[0]
+	if body["status"] != "read" {
+		t.Fatalf("got status %v, want \"read\"", body["status"])
+	}
+	if body["message_id"] != "wamid.typing1" {
+		t.Fatalf("got message_id %v, want the inbound message's wamid", body["message_id"])
+	}
+	ti, ok := body["typing_indicator"].(map[string]any)
+	if !ok || ti["type"] != "text" {
+		t.Fatalf("got typing_indicator %v, want {type: text}", body["typing_indicator"])
+	}
+}
+
+// TestReceiveEvent_Duplicate_DoesNotMarkRead is the required negative
+// case: a message the idempotency fast-path recognizes as already seen
+// must not fire a second read-receipt/typing-indicator call.
+func TestReceiveEvent_Duplicate_DoesNotMarkRead(t *testing.T) {
+	pool := dbtest.Open(t)
+	rdb := dbtest.OpenRedis(t)
+	dbtest.CreateUser(t, pool, "+16505551301")
+
+	var callCount int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		callCount++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"success":true}`))
+	}))
+	t.Cleanup(srv.Close)
+	t.Cleanup(whatsapp.SetGraphAPIBaseURLForTest(srv.URL))
+
+	svc := whatsapp.NewService(pool, rdb, "test-secret", "test-verify-token", "test-access-token", "test-phone-number-id", slog.Default())
+	payload := textPayload("16505551301", "wamid.typing.dup", "hello")
+
+	if _, err := svc.ReceiveEvent(context.Background(), payload); err != nil {
+		t.Fatalf("first call: %v", err)
+	}
+	firstCount := callCount
+	if firstCount != 1 {
+		t.Fatalf("got %d Graph API calls for the first (fresh) delivery, want 1", firstCount)
+	}
+
+	if _, err := svc.ReceiveEvent(context.Background(), payload); err != nil {
+		t.Fatalf("second call: %v", err)
+	}
+	if callCount != firstCount {
+		t.Fatalf("got %d Graph API calls after a duplicate delivery, want still %d — a deduped message must not trigger a mark-read call", callCount, firstCount)
 	}
 }

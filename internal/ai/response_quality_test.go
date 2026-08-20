@@ -65,13 +65,52 @@ func TestProcessor_Help_ContainsConcreteExamplePhrasings(t *testing.T) {
 	}
 
 	// Concrete example phrasings, not just intent names/feature labels.
-	for _, want := range []string{"took", "paid", "who owes", "5k"} {
+	for _, want := range []string{"took", "paid", "Who owes", "5k"} {
 		if !strings.Contains(reply.Text, want) {
 			t.Fatalf("got HELP reply %q, want it to contain an example phrasing like %q", reply.Text, want)
 		}
 	}
 	if !strings.Contains(reply.Text, "*") {
 		t.Fatalf("got HELP reply %q, want WhatsApp bold formatting applied", reply.Text)
+	}
+}
+
+// TestProcessor_Help_UsesExactReplacementCopy is docs/BRIEF-polish-and-
+// hardening.md #2's own requirement: the capability-list copy is used
+// verbatim, not paraphrased — and comes with the same three quick-action
+// buttons as the greeting menu (#3), every time this content appears.
+func TestProcessor_Help_UsesExactReplacementCopy(t *testing.T) {
+	pool := dbtest.Open(t)
+	rdb := dbtest.OpenRedis(t)
+	userID := dbtest.CreateUser(t, pool, "+2348091000012")
+
+	extractor := &fakeExtractor{results: []ai.RawIntent{
+		{Intent: ai.IntentHelp, Language: ai.LangEnglish},
+	}}
+	phraser := &fakePhraser{}
+	sender := &fakeSender{}
+	p := newTestProcessor(pool, rdb, extractor, phraser, sender)
+
+	reply, err := p.Handle(context.Background(), ai.ToInboundMessage(userID, "wamid.help.exact.1", "text", new("what can you do")))
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+
+	want := "Here's what I can help you manage:\n\n" +
+		"*Record a sale on credit*\n" +
+		"e.g. \"Chinedu took 5k, pays Friday\"\n\n" +
+		"*Log a payment*\n" +
+		"e.g. \"Chinedu paid 5k\"\n\n" +
+		"*Review outstanding balances*\n" +
+		"e.g. \"Who owes me?\"\n\n" +
+		"*Check a specific customer*\n" +
+		"e.g. \"How much does Chinedu owe?\"\n\n" +
+		"Tell me in your own words, I'll take it from there."
+	if reply.Text != want {
+		t.Fatalf("got HELP reply %q, want the exact replacement copy %q", reply.Text, want)
+	}
+	if len(reply.Buttons) != 3 {
+		t.Fatalf("got %d buttons on the HELP reply, want 3 (the same greeting-menu quick actions)", len(reply.Buttons))
 	}
 }
 

@@ -359,3 +359,78 @@ func TestProcessor_ReminderDispatch_UsesTemplatedShape(t *testing.T) {
 		t.Fatalf("got customerCalls=%d traderCalls=%d, want 2 and 2", customerCalls, traderCalls)
 	}
 }
+
+// TestProcessor_ReminderOptIn_FreeText_Yes is docs/BRIEF-polish-and-
+// hardening.md #3's required free-text fallback: typing "yes" must
+// schedule reminders exactly like tapping "Yes, remind them" does —
+// buttons are additive, never a replacement.
+func TestProcessor_ReminderOptIn_FreeText_Yes(t *testing.T) {
+	pool := dbtest.Open(t)
+	rdb := dbtest.OpenRedis(t)
+	userID := dbtest.CreateUser(t, pool, "+2348080000006")
+	customers := customer.NewService(pool)
+	seeded, err := customers.Create(context.Background(), userID, "Chinedu", new("+2348030000011"), nil)
+	if err != nil {
+		t.Fatalf("seed customer: %v", err)
+	}
+	if err := customer.SetLastCustomerContext(context.Background(), rdb, userID, seeded.ID, customer.DefaultLastCustomerContextTTL); err != nil {
+		t.Fatalf("seed last customer context: %v", err)
+	}
+
+	dueDate := time.Now().Add(72 * time.Hour).Format(time.DateOnly)
+	extractor := &fakeExtractor{results: []ai.RawIntent{
+		{Intent: ai.IntentCreateDebt, CustomerName: new("Chinedu"), AmountMinor: new(int64(5000000)), DueDateISO: &dueDate, Confidence: ai.ConfidenceHigh, Language: ai.LangEnglish},
+	}}
+	phraser := &fakePhraser{}
+	sender := &fakeSender{}
+	templateSender := &fakeTemplateSender{}
+	p := newTestProcessorWithReminders(pool, rdb, extractor, phraser, sender, templateSender)
+
+	if _, err := p.Handle(context.Background(), ai.ToInboundMessage(userID, "wamid.remind.6a", "text", new("Chinedu took 50k, due Friday"))); err != nil {
+		t.Fatalf("Handle (create debt): %v", err)
+	}
+	scheduled, err := p.Handle(context.Background(), ai.ToInboundMessage(userID, "wamid.remind.6b", "text", new("yes")))
+	if err != nil {
+		t.Fatalf("Handle (free-text yes): %v", err)
+	}
+	if !strings.Contains(scheduled.Text, "Chinedu") {
+		t.Fatalf("got reply %q, want a scheduling confirmation naming Chinedu", scheduled.Text)
+	}
+	if got := countRows(t, pool, `SELECT count(*) FROM reminders WHERE recipient_type = 'CUSTOMER'`); got != 2 {
+		t.Fatalf("got %d customer reminders scheduled, want 2 (day-before and due-date)", got)
+	}
+}
+
+// TestProcessor_ReminderOptIn_FreeText_No confirms the "No" branch
+// works as free text too.
+func TestProcessor_ReminderOptIn_FreeText_No(t *testing.T) {
+	pool := dbtest.Open(t)
+	rdb := dbtest.OpenRedis(t)
+	userID := dbtest.CreateUser(t, pool, "+2348080000007")
+
+	dueDate := time.Now().Add(72 * time.Hour).Format(time.DateOnly)
+	extractor := &fakeExtractor{results: []ai.RawIntent{
+		{Intent: ai.IntentCreateDebt, CustomerName: new("Chinedu"), AmountMinor: new(int64(5000000)), DueDateISO: &dueDate, Confidence: ai.ConfidenceHigh, Language: ai.LangEnglish},
+	}}
+	phraser := &fakePhraser{}
+	sender := &fakeSender{}
+	templateSender := &fakeTemplateSender{}
+	p := newTestProcessorWithReminders(pool, rdb, extractor, phraser, sender, templateSender)
+
+	if _, err := p.Handle(context.Background(), ai.ToInboundMessage(userID, "wamid.remind.7a", "text", new("Chinedu took 50k, due Friday"))); err != nil {
+		t.Fatalf("Handle (create debt): %v", err)
+	}
+	declined, err := p.Handle(context.Background(), ai.ToInboundMessage(userID, "wamid.remind.7b", "text", new("no")))
+	if err != nil {
+		t.Fatalf("Handle (free-text no): %v", err)
+	}
+	if declined.Text == "" {
+		t.Fatal("got an empty reply for a declined reminder opt-in")
+	}
+	if got := countRows(t, pool, `SELECT count(*) FROM reminders WHERE recipient_type = 'CUSTOMER'`); got != 0 {
+		t.Fatalf("got %d customer reminders, want 0 — the trader declined", got)
+	}
+	if _, ok, err := ai.GetPendingAction(context.Background(), rdb, userID); err != nil || ok {
+		t.Fatalf("got a pending action still set (ok=%v err=%v), want cleared", ok, err)
+	}
+}

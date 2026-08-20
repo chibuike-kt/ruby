@@ -96,25 +96,64 @@ func (p *Processor) beginSlotFill(ctx context.Context, userID int64, raw RawInte
 	return p.slotFillQuestion(raw, missing[0]), nil
 }
 
+// slotFillCancelButton is docs/BRIEF-polish-and-hardening.md #3's single
+// addition to the slot-filling flow: the question itself stays free
+// text (the answer space is genuinely open), but a Cancel button rides
+// alongside it so backing out is one tap instead of typing "cancel" or a
+// language-specific equivalent. Reuses buttonCancel's id so a tap lands
+// on exactly the same "cancelled" acknowledgment the free-text path
+// already gives (see handleSlotFillButtonReply) — buttons are additive,
+// never a replacement for the existing free-text cancel phrases.
+func slotFillCancelButton() []Button {
+	return []Button{{ID: buttonCancel, Title: "Cancel"}}
+}
+
 func (p *Processor) slotFillQuestion(raw RawIntent, field SlotField) Reply {
 	switch field {
 	case SlotAmount:
 		if name := trimOrEmpty(raw.CustomerName); name != "" {
-			return textReply(fmt.Sprintf(fixedText(slotFillAmountWithNameText, raw.Language), name))
+			return Reply{Text: fmt.Sprintf(fixedText(slotFillAmountWithNameText, raw.Language), name), Buttons: slotFillCancelButton()}
 		}
-		return textReply(fixedText(slotFillAmountText, raw.Language))
+		return Reply{Text: fixedText(slotFillAmountText, raw.Language), Buttons: slotFillCancelButton()}
 	default: // SlotCustomer
-		return textReply(fixedText(slotFillCustomerText, raw.Language))
+		return Reply{Text: fixedText(slotFillCustomerText, raw.Language), Buttons: slotFillCancelButton()}
 	}
 }
 
 func (p *Processor) slotFillReask(raw RawIntent, field SlotField) Reply {
 	switch field {
 	case SlotAmount:
-		return textReply(fixedText(slotFillAmountReaskText, raw.Language))
+		return Reply{Text: fixedText(slotFillAmountReaskText, raw.Language), Buttons: slotFillCancelButton()}
 	default: // SlotCustomer
-		return textReply(fixedText(slotFillCustomerReaskText, raw.Language))
+		return Reply{Text: fixedText(slotFillCustomerReaskText, raw.Language), Buttons: slotFillCancelButton()}
 	}
+}
+
+// handleSlotFillButtonReply handles a tap on slotFillCancelButton — the
+// only button ever attached during slot-filling. An unrecognized id
+// (shouldn't happen: Ruby only ever sends this one button here) re-asks
+// the current question rather than silently dropping it, the same
+// pattern as every other pending kind's default case.
+func (p *Processor) handleSlotFillButtonReply(ctx context.Context, msg InboundMessage, pending PendingAction, id string) (Reply, Language, error) {
+	lang := pending.Intent.Language
+
+	if id != buttonCancel {
+		hint, err := p.contextHint(ctx, msg.UserID)
+		if err != nil {
+			return Reply{}, lang, err
+		}
+		missing := missingSlotFields(pending.Intent, hint)
+		if len(missing) == 0 {
+			reply, err := p.validateAndExecute(ctx, msg, pending.Intent)
+			return reply, lang, err
+		}
+		return p.slotFillQuestion(pending.Intent, missing[0]), lang, nil
+	}
+
+	if err := ClearPendingAction(ctx, p.cfg.Redis, msg.UserID); err != nil {
+		p.logf("failed to clear pending action", "error", err)
+	}
+	return textReply(fixedText(cancelledText, lang)), lang, nil
 }
 
 // handleSlotFillReply is the interactive slot-filling section's core

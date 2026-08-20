@@ -71,6 +71,54 @@ func TestSendText_NonOKStatus(t *testing.T) {
 	}
 }
 
+// TestSendText_RetriesOnTransientFailure is docs/BRIEF-polish-and-
+// hardening.md #4's required retry/backoff behavior: a transient
+// failure (here, two consecutive 503s) is retried, not surfaced
+// immediately — a flaky upstream call must not fail the whole send on
+// one bad attempt.
+func TestSendText_RetriesOnTransientFailure(t *testing.T) {
+	var attempts int
+	withTestGraphAPI(t, func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		if attempts < 3 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"messages":[{"id":"wamid.RETRY123"}]}`))
+	})
+
+	id, err := sendText(context.Background(), "test-token", "123", "+234", "hi")
+	if err != nil {
+		t.Fatalf("sendText: %v", err)
+	}
+	if id != "wamid.RETRY123" {
+		t.Fatalf("got id %q, want wamid.RETRY123", id)
+	}
+	if attempts != 3 {
+		t.Fatalf("got %d attempts, want 3 (two transient 503s, then success)", attempts)
+	}
+}
+
+// TestSendText_DoesNotRetryOnClientError confirms a genuine client
+// error (a 4xx other than 429) is never retried — retrying can't fix a
+// malformed request, and for a message-send call it would risk
+// delivering the same message twice.
+func TestSendText_DoesNotRetryOnClientError(t *testing.T) {
+	var attempts int
+	withTestGraphAPI(t, func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		w.WriteHeader(http.StatusBadRequest)
+	})
+
+	if _, err := sendText(context.Background(), "test-token", "123", "+234", "hi"); err == nil {
+		t.Fatal("expected an error for a 400 response, got nil")
+	}
+	if attempts != 1 {
+		t.Fatalf("got %d attempts, want 1 — a genuine client error must never be retried", attempts)
+	}
+}
+
 func TestDownloadMedia_Success(t *testing.T) {
 	const audioBytes = "not-really-ogg-bytes"
 	var cdnHit bool
