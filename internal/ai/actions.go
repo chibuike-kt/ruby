@@ -40,6 +40,25 @@ type GetCustomerBalanceAction struct {
 	CustomerID int64
 }
 
+// GetCustomerStatementAction backs docs/BRIEF-disambiguation-reminders-
+// statements.md Tier 3's real per-customer account history.
+type GetCustomerStatementAction struct {
+	CustomerID int64
+}
+
+// CreateReminderAction and CancelReminderAction back docs/BRIEF-
+// disambiguation-reminders-statements.md Tier 2's standalone reminder
+// intents — CustomerID only, never a name: identity resolution already
+// happened in Validate, same as every other mutating action here.
+type CreateReminderAction struct {
+	CustomerID   int64
+	ReminderDate time.Time
+}
+
+type CancelReminderAction struct {
+	CustomerID int64
+}
+
 type ListCustomersAction struct{}
 type ListOutstandingDebtsAction struct{}
 type GetTotalOutstandingAction struct{}
@@ -56,7 +75,10 @@ type UnsupportedAction struct {
 
 func (CreateDebtAction) isAction()           {}
 func (RecordPaymentAction) isAction()        {}
+func (CreateReminderAction) isAction()       {}
+func (CancelReminderAction) isAction()       {}
 func (GetCustomerBalanceAction) isAction()   {}
+func (GetCustomerStatementAction) isAction() {}
 func (ListCustomersAction) isAction()        {}
 func (ListOutstandingDebtsAction) isAction() {}
 func (GetTotalOutstandingAction) isAction()  {}

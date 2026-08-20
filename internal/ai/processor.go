@@ -287,8 +287,6 @@ func (p *Processor) process(ctx context.Context, msg InboundMessage, acct accoun
 	}
 
 	switch raw.Intent {
-	case IntentCreateReminder, IntentCancelReminder:
-		return textReply(fixedText(reminderUnsupportedText, lang)), lang, nil
 	case IntentConfirmAction:
 		return textReply(fixedText(nothingToConfirmText, lang)), lang, nil
 	case IntentHelp:
@@ -878,12 +876,12 @@ func (p *Processor) beginDisambiguation(ctx context.Context, msg InboundMessage,
 	return disambiguationReplyFor(text, candidates), nil
 }
 
-// outstandingDescriptions maps customer_id -> one representative
-// outstanding-debt description, for AmbiguousError.Hints (decisions.md
-// #8: description is a real distinguishing signal). When a customer has
-// more than one outstanding debt, the first one found is used — Hints
-// only needs *a* description to detect divergence between candidates,
-// not an exhaustive list.
+// outstandingDescriptions maps customer_id -> the most recent
+// outstanding-debt description, for AmbiguousError.Hints
+// (docs/BRIEF-disambiguation-reminders-statements.md Tier 1c: "the most
+// recent transaction's item description"). ListOutstanding orders
+// oldest-first, so always overwriting as it iterates leaves the last
+// (most recent) description per customer standing.
 func (p *Processor) outstandingDescriptions(ctx context.Context, userID int64) (map[int64]string, error) {
 	debts, err := p.cfg.Debts.ListOutstanding(ctx, userID)
 	if err != nil {
@@ -891,7 +889,7 @@ func (p *Processor) outstandingDescriptions(ctx context.Context, userID int64) (
 	}
 	byCustomer := map[int64]string{}
 	for _, d := range debts {
-		if _, ok := byCustomer[d.CustomerID]; !ok && d.Description != "" {
+		if d.Description != "" {
 			byCustomer[d.CustomerID] = d.Description
 		}
 	}
@@ -906,6 +904,8 @@ func (p *Processor) execute(ctx context.Context, msg InboundMessage, raw RawInte
 		return p.executeRecordPayment(ctx, msg, raw, a)
 	case GetCustomerBalanceAction:
 		return p.executeGetCustomerBalance(ctx, msg, raw, a)
+	case GetCustomerStatementAction:
+		return p.executeGetCustomerStatement(ctx, msg, raw, a)
 	case ListCustomersAction:
 		return p.executeListCustomers(ctx, msg, raw)
 	case ListOutstandingDebtsAction:
@@ -914,14 +914,15 @@ func (p *Processor) execute(ctx context.Context, msg InboundMessage, raw RawInte
 		return p.executeGetTotalOutstanding(ctx, msg, raw)
 	case GetPaymentSummaryAction:
 		return p.executeGetPaymentSummary(ctx, msg, raw)
+	case CreateReminderAction:
+		return p.executeCreateReminder(ctx, msg, raw, a)
+	case CancelReminderAction:
+		return p.executeCancelReminder(ctx, msg, raw, a)
 	case HelpAction:
 		return helpReply(raw.Language), nil
 	case UnsupportedAction:
 		// docs/BRIEF-critical-fixes-and-reminders.md #1c: an honest
-		// decline plus the real capability list — never
-		// reminderUnsupportedText, which is specific to the
-		// recognized-but-not-yet-built reminder intents (those never
-		// reach here at all; see process()'s own switch).
+		// decline plus the real capability list.
 		return unsupportedReply(raw.Language), nil
 	default:
 		return Reply{}, fmt.Errorf("ai: unknown action type %T", action)
@@ -1185,6 +1186,121 @@ func (p *Processor) executeGetCustomerBalance(ctx context.Context, msg InboundMe
 	}
 	text, err := p.phrase(ctx, PhraseInput{Event: EventCustomerBalance, Language: raw.Language, CustomerName: c.Name, OutstandingMinor: &outstanding})
 	return textReply(text), err
+}
+
+// executeGetCustomerStatement is built deterministically in Go, not
+// phrased by the AI (docs/BRIEF-disambiguation-reminders-statements.md
+// Tier 3) — the same reasoning as executeListOutstandingDebts: this is
+// real financial data being read back to a trader, and a list of
+// amounts/dates is exactly the highest-risk surface for a model to
+// drop or alter a number.
+func (p *Processor) executeGetCustomerStatement(ctx context.Context, msg InboundMessage, raw RawIntent, a GetCustomerStatementAction) (Reply, error) {
+	c, err := customer.GetByID(ctx, p.cfg.Pool, msg.UserID, a.CustomerID)
+	if err != nil {
+		return Reply{}, err
+	}
+	debts, err := p.cfg.Debts.ListByCustomer(ctx, msg.UserID, a.CustomerID)
+	if err != nil {
+		return Reply{}, err
+	}
+	if len(debts) == 0 {
+		return textReply(fmt.Sprintf(fixedText(noStatementHistoryText, raw.Language), c.Name)), nil
+	}
+
+	lines := make([]statementDebtLine, len(debts))
+	var outstandingMinor int64
+	for i, d := range debts {
+		payments, err := payment.ListByDebt(ctx, p.cfg.Pool, d.ID)
+		if err != nil {
+			return Reply{}, err
+		}
+		paidLines := make([]statementPaymentLine, len(payments))
+		var paidMinor int64
+		for j, pmt := range payments {
+			paidLines[j] = statementPaymentLine{amountMinor: pmt.AmountMinor, date: pmt.CreatedAt}
+			paidMinor += pmt.AmountMinor
+		}
+		remaining := d.Amount.MinorUnits() - paidMinor
+		if d.Status != debt.StatusSettled {
+			outstandingMinor += remaining
+		}
+		lines[i] = statementDebtLine{
+			description: d.Description,
+			amountMinor: d.Amount.MinorUnits(),
+			date:        d.CreatedAt,
+			payments:    paidLines,
+		}
+	}
+
+	return textReply(formatCustomerStatement(c.Name, lines, outstandingMinor, raw.Language)), nil
+}
+
+// executeCreateReminder is docs/BRIEF-disambiguation-reminders-
+// statements.md Tier 2a/2b's standalone reminder — invokable at any
+// point in a conversation about any existing debt, using the date the
+// trader actually asked for rather than requiring the underlying debt
+// to have a due date on record. Applies to the customer's oldest
+// outstanding debt, the same convention RECORD_PAYMENT already uses
+// when a customer has more than one (plan decision #6) — the spec never
+// defines multi-debt disambiguation and this session's scope doesn't
+// add it. A trader-facing self-reminder (ScheduleTraderReminders), not
+// the customer opt-in flow: Tier 2a's own example is "remind me," not
+// "remind him."
+func (p *Processor) executeCreateReminder(ctx context.Context, msg InboundMessage, raw RawIntent, a CreateReminderAction) (Reply, error) {
+	c, err := customer.GetByID(ctx, p.cfg.Pool, msg.UserID, a.CustomerID)
+	if err != nil {
+		return Reply{}, err
+	}
+	target, err := p.oldestOutstandingDebt(ctx, msg.UserID, a.CustomerID)
+	if err != nil {
+		if errors.Is(err, errNoOutstandingDebt) {
+			text, err := p.phrase(ctx, PhraseInput{Event: EventNoOutstandingDebt, Language: raw.Language, CustomerName: c.Name})
+			return textReply(text), err
+		}
+		return Reply{}, err
+	}
+	if p.cfg.Reminders == nil {
+		return textReply(fixedText(reminderUnsupportedText, raw.Language)), nil
+	}
+	if _, err := p.cfg.Reminders.ScheduleTraderReminders(ctx, target.ID, msg.UserID, a.ReminderDate); err != nil {
+		return Reply{}, err
+	}
+	return textReply(fmt.Sprintf(fixedText(standaloneReminderScheduledText, raw.Language), c.Name, a.ReminderDate.Format(dueDateDisplayFormat))), nil
+}
+
+// executeCancelReminder is Tier 2c's CANCEL_REMINDER — cancels every
+// still-SCHEDULED reminder (either recipient type: the automatic
+// trader reminders and any customer opt-in) across all of the
+// referenced customer's debts, since the trader references the
+// customer or debt, not a specific reminder id they'd have no way of
+// knowing.
+func (p *Processor) executeCancelReminder(ctx context.Context, msg InboundMessage, raw RawIntent, a CancelReminderAction) (Reply, error) {
+	c, err := customer.GetByID(ctx, p.cfg.Pool, msg.UserID, a.CustomerID)
+	if err != nil {
+		return Reply{}, err
+	}
+	if p.cfg.Reminders == nil {
+		return textReply(fixedText(reminderUnsupportedText, raw.Language)), nil
+	}
+	debts, err := p.cfg.Debts.ListOutstanding(ctx, msg.UserID)
+	if err != nil {
+		return Reply{}, err
+	}
+	var cancelled int
+	for _, d := range debts {
+		if d.CustomerID != a.CustomerID {
+			continue
+		}
+		n, err := p.cfg.Reminders.CancelForDebt(ctx, d.ID)
+		if err != nil {
+			return Reply{}, err
+		}
+		cancelled += n
+	}
+	if cancelled == 0 {
+		return textReply(fmt.Sprintf(fixedText(noReminderScheduledText, raw.Language), c.Name)), nil
+	}
+	return textReply(fmt.Sprintf(fixedText(reminderCancelledText, raw.Language), c.Name)), nil
 }
 
 // executeListCustomers is built deterministically in Go, not phrased by

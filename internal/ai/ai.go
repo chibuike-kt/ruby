@@ -27,15 +27,23 @@ const (
 	IntentConfirmAction        IntentType = "CONFIRM_ACTION"
 	IntentHelp                 IntentType = "HELP"
 
+	// IntentGetCustomerStatement is docs/BRIEF-disambiguation-reminders-
+	// statements.md Tier 3: a real per-customer account history (every
+	// debt with its item description and date, every payment against
+	// each, and the current outstanding balance) — replacing what used
+	// to be an honest UNSUPPORTED decline now that the feature is real.
+	// Recognized from natural phrasing ("give me a breakdown for
+	// Emmanuel", "summarize what he owes", "show his account"), not
+	// only the literal word "statement."
+	IntentGetCustomerStatement IntentType = "GET_CUSTOMER_STATEMENT"
+
 	// IntentUnsupported is docs/BRIEF-critical-fixes-and-reminders.md
 	// #1c's structural guard: a request for something Ruby genuinely
 	// doesn't do (invoicing, inventory, expense tracking, anything
 	// outside bookkeeping for credit sales) must land here, explicitly,
 	// rather than being force-fit into the closest-sounding real intent
 	// and then improvised into a fake multi-turn flow via slot-filling.
-	// Distinct from HELP (an explicit "what can you do" ask) and from
-	// CREATE_REMINDER/CANCEL_REMINDER (a recognized-but-not-yet-
-	// user-invokable feature, handled separately).
+	// Distinct from HELP (an explicit "what can you do" ask).
 	IntentUnsupported IntentType = "UNSUPPORTED"
 
 	// IntentSmallTalk and IntentSelfQuery are #3a/#3b's split of what

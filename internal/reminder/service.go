@@ -49,8 +49,21 @@ func (s *Service) OptIn(ctx context.Context, debtID, customerID int64, dueDate t
 // every debt with a due date gets — no opt-in, no consent question:
 // this is the trader's own data reflected back to them
 // (docs/BRIEF-critical-fixes-and-reminders.md's full reminder system).
+// It's also reused directly for docs/BRIEF-disambiguation-reminders-
+// statements.md Tier 2a/2b's standalone CREATE_REMINDER intent
+// ("remind me about his payment tomorrow"), passing the date the
+// trader actually asked for rather than the debt's own due date — the
+// same day-before/day-of scheduling shape, just invoked at a different
+// point in the conversation and off a different date source.
 func (s *Service) ScheduleTraderReminders(ctx context.Context, debtID, userID int64, dueDate time.Time) ([]Reminder, error) {
 	return ScheduleTrader(ctx, s.pool, debtID, userID, dueDate, s.traderTemplateName)
+}
+
+// CancelForDebt cancels every scheduled reminder attached to debtID —
+// docs/BRIEF-disambiguation-reminders-statements.md Tier 2c's
+// CANCEL_REMINDER intent.
+func (s *Service) CancelForDebt(ctx context.Context, debtID int64) (int, error) {
+	return CancelForDebt(ctx, s.pool, debtID, "cancelled by trader")
 }
 
 // dispatchBatchSize bounds one Dispatch call so a large backlog (e.g.

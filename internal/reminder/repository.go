@@ -164,6 +164,25 @@ func MarkCancelled(ctx context.Context, q db.Querier, id int64, reason string) e
 	return err
 }
 
+// CancelForDebt cancels every still-SCHEDULED reminder attached to
+// debtID, regardless of recipient type — docs/BRIEF-disambiguation-
+// reminders-statements.md Tier 2c: a trader can cancel a reminder by
+// referencing the customer or debt it's attached to, not by id. Scoped
+// to WHERE status = 'SCHEDULED' so a reminder already SENT/FAILED/
+// CANCELLED is left alone. Returns how many rows were actually
+// cancelled, so the caller can give an honest "nothing was scheduled"
+// reply when there was nothing to cancel.
+func CancelForDebt(ctx context.Context, q db.Querier, debtID int64, reason string) (int, error) {
+	tag, err := q.Exec(ctx, `
+		UPDATE reminders SET status = 'CANCELLED', failure_reason = $1
+		WHERE debt_id = $2 AND status = 'SCHEDULED'
+	`, reason, debtID)
+	if err != nil {
+		return 0, err
+	}
+	return int(tag.RowsAffected()), nil
+}
+
 type row interface {
 	Scan(dest ...any) error
 }

@@ -14,6 +14,12 @@ import (
 var (
 	ErrAmountRequired   = errors.New("ai: could not determine an amount")
 	ErrCustomerRequired = errors.New("ai: could not determine which customer this is about")
+	// ErrReminderDateRequired is CREATE_REMINDER's defensive counterpart
+	// to ErrAmountRequired: slot-filling guarantees a date is present
+	// before Validate is ever reached in the normal flow (see
+	// requiredSlotFields), so this only fires if Validate is invoked
+	// directly with an incomplete intent.
+	ErrReminderDateRequired = errors.New("ai: could not determine when to remind")
 )
 
 // CustomerNotFoundError means a mutating-but-not-CREATE_DEBT intent (e.g.
@@ -91,6 +97,12 @@ func (v *Validator) Validate(ctx context.Context, userID int64, raw RawIntent, h
 		return v.validateRecordPayment(ctx, userID, raw, hint)
 	case IntentGetCustomerBalance:
 		return v.validateGetCustomerBalance(ctx, userID, raw, hint)
+	case IntentCreateReminder:
+		return v.validateCreateReminder(ctx, userID, raw, hint)
+	case IntentCancelReminder:
+		return v.validateCancelReminder(ctx, userID, raw, hint)
+	case IntentGetCustomerStatement:
+		return v.validateGetCustomerStatement(ctx, userID, raw, hint)
 	case IntentListCustomers:
 		return ListCustomersAction{}, nil
 	case IntentListOutstandingDebts:
@@ -137,6 +149,44 @@ func (v *Validator) validateRecordPayment(ctx context.Context, userID int64, raw
 		return nil, err
 	}
 	return RecordPaymentAction{CustomerID: customerID, Amount: amount}, nil
+}
+
+// validateCreateReminder and validateCancelReminder back docs/BRIEF-
+// disambiguation-reminders-statements.md Tier 2's standalone reminder
+// intents. checkIdentity is false here, same reasoning as balance
+// lookups: scheduling or cancelling a reminder doesn't attribute money
+// to anyone, so there's nothing for a wrong same/new guess to get
+// wrong — only CREATE_DEBT/RECORD_PAYMENT need decisions.md #9's gate.
+func (v *Validator) validateCreateReminder(ctx context.Context, userID int64, raw RawIntent, hint ContextHint) (Action, error) {
+	customerID, err := v.resolveExistingCustomer(ctx, userID, raw.CustomerName, hint, false)
+	if err != nil {
+		return nil, err
+	}
+	date := parseDueDate(raw.DueDateISO)
+	if date == nil {
+		return nil, ErrReminderDateRequired
+	}
+	return CreateReminderAction{CustomerID: customerID, ReminderDate: *date}, nil
+}
+
+func (v *Validator) validateCancelReminder(ctx context.Context, userID int64, raw RawIntent, hint ContextHint) (Action, error) {
+	customerID, err := v.resolveExistingCustomer(ctx, userID, raw.CustomerName, hint, false)
+	if err != nil {
+		return nil, err
+	}
+	return CancelReminderAction{CustomerID: customerID}, nil
+}
+
+// validateGetCustomerStatement is docs/BRIEF-disambiguation-reminders-
+// statements.md Tier 3 — checkIdentity is false, same reasoning as
+// balance lookups: reading back a customer's own history doesn't
+// attribute anything to anyone.
+func (v *Validator) validateGetCustomerStatement(ctx context.Context, userID int64, raw RawIntent, hint ContextHint) (Action, error) {
+	customerID, err := v.resolveExistingCustomer(ctx, userID, raw.CustomerName, hint, false)
+	if err != nil {
+		return nil, err
+	}
+	return GetCustomerStatementAction{CustomerID: customerID}, nil
 }
 
 func (v *Validator) validateGetCustomerBalance(ctx context.Context, userID int64, raw RawIntent, hint ContextHint) (Action, error) {
