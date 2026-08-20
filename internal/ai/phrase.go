@@ -61,42 +61,97 @@ type PhraseInput struct {
 // outcome don't need a model call, and reusing the phrasing call for
 // these would risk it drifting toward seeing raw trader text over time.
 // Kept deliberately short and simple to bound translation-quality risk.
-// helpText spells out concrete example phrasings for each of the four
-// things a trader can actually do (docs/BRIEF-response-quality.md #3) —
-// "phrased as examples of things to say, not a feature list" — with
-// WhatsApp formatting applied per #5 (bold labels, one capability per
-// line) so it reads as a scannable mini-menu, not a paragraph.
-var helpText = map[Language]string{
-	LangEnglish: "Here's what I can do:\n\n" +
-		"*Record a debt* — \"Chinedu took 5k, pays Friday\"\n" +
-		"*Record a payment* — \"Chinedu paid 5k\"\n" +
-		"*Check who owes you* — \"Who owes me?\"\n" +
-		"*Check one customer* — \"How much does Chinedu owe me?\"\n\n" +
-		"Just send a message like one of these, in your own words.",
-	LangPidgin: "Na dis I fit do:\n\n" +
-		"*Record debt* — \"Chinedu carry 5k, e go pay Friday\"\n" +
-		"*Record payment* — \"Chinedu pay 5k\"\n" +
-		"*Check who owe you* — \"Who owe me?\"\n" +
-		"*Check one customer* — \"How much Chinedu owe me?\"\n\n" +
-		"Just send message like one of dis, for your own way.",
-	LangYoruba: "Ìwọ̀nyí ni mo lè ṣe:\n\n" +
-		"*Ṣàkọsílẹ̀ gbèsè* — \"Chinedu gba 5k, yóò san ní Friday\"\n" +
-		"*Ṣàkọsílẹ̀ ìsanwó* — \"Chinedu san 5k\"\n" +
-		"*Ẹni tó jẹ ọ́ ní gbèsè* — \"Ta ló jẹ mí ní gbèsè?\"\n" +
-		"*Ọ̀kan pàtó* — \"Èló ni Chinedu jẹ mí?\"\n\n" +
-		"Fi ránṣẹ́ irú ọ̀kan nínú àwọn wọ̀nyí, ní ọ̀nà tìẹ.",
-	LangIgbo: "Ihe ndị a ka m nwere ike ime:\n\n" +
-		"*Dekọọ ụgwọ* — \"Chinedu were 5k, ọ ga-akwụ na Friday\"\n" +
-		"*Dekọọ ịkwụ ụgwọ* — \"Chinedu kwụrụ 5k\"\n" +
-		"*Onye ji gị ụgwọ* — \"Onye ji m ụgwọ?\"\n" +
-		"*Otu onye* — \"Ego ole Chinedu ji m?\"\n\n" +
-		"Naanị zipu ozi dịka otu n'ime ndị a, n'okwu gị.",
-	LangHausa: "Ga abin da zan iya yi:\n\n" +
-		"*Rikodin bashi* — \"Chinedu ya dauka 5k, zai biya Jumma'a\"\n" +
-		"*Rikodin biya* — \"Chinedu ya biya 5k\"\n" +
-		"*Duba wanda ke bin ka* — \"Wa ke bin ni bashi?\"\n" +
-		"*Duba wani abokin ciniki* — \"Nawa Chinedu ke bi na bashi?\"\n\n" +
-		"Kawai aika sako kamar ɗaya daga cikin waɗannan, a hanyar da ka fi so.",
+// capabilityListText is docs/BRIEF-polish-and-hardening.md #2's exact
+// replacement copy — verbatim in English; translated at the same
+// quality bar as every other table in this file for the other four
+// languages — minus its opening line, which withCapabilityList's own
+// per-context prefix supplies (helpText's prefix reproduces #2's exact
+// header; unsupportedRequestText's prefix keeps 1c's required "I can't
+// do that yet" honest-decline framing instead). Factored out so every
+// path that shows the capability list (HELP, the unsupported-request
+// decline, the greeting menu's Help button) shows byte-identical item
+// wording, never versions that drift apart over time.
+var capabilityListText = map[Language]string{
+	LangEnglish: "*Record a sale on credit*\n" +
+		"e.g. \"Chinedu took 5k, pays Friday\"\n\n" +
+		"*Log a payment*\n" +
+		"e.g. \"Chinedu paid 5k\"\n\n" +
+		"*Review outstanding balances*\n" +
+		"e.g. \"Who owes me?\"\n\n" +
+		"*Check a specific customer*\n" +
+		"e.g. \"How much does Chinedu owe?\"\n\n" +
+		"Tell me in your own words, I'll take it from there.",
+	LangPidgin: "*Record sale wey dey on credit*\n" +
+		"e.g. \"Chinedu carry 5k, e go pay Friday\"\n\n" +
+		"*Log payment*\n" +
+		"e.g. \"Chinedu pay 5k\"\n\n" +
+		"*Check outstanding balance*\n" +
+		"e.g. \"Who owe me?\"\n\n" +
+		"*Check one customer*\n" +
+		"e.g. \"How much Chinedu owe?\"\n\n" +
+		"Tell me for your own way, I go take it from there.",
+	LangYoruba: "*Ṣàkọsílẹ̀ ọjà tí a tà lórí gbèsè*\n" +
+		"e.g. \"Chinedu gba 5k, yóò san ní Friday\"\n\n" +
+		"*Ṣàkọsílẹ̀ ìsanwó*\n" +
+		"e.g. \"Chinedu san 5k\"\n\n" +
+		"*Ṣàyẹ̀wò gbèsè tó ṣẹ́kù*\n" +
+		"e.g. \"Ta ló jẹ mí ní gbèsè?\"\n\n" +
+		"*Ṣàyẹ̀wò oníbàárà kan pàtó*\n" +
+		"e.g. \"Èló ni Chinedu jẹ mí?\"\n\n" +
+		"Sọ ọ́ ní ọ̀nà tìẹ, màá tẹ̀síwájú láti ibẹ̀.",
+	LangIgbo: "*Dekọọ ahịa e refuru na ụgwọ*\n" +
+		"e.g. \"Chinedu were 5k, ọ ga-akwụ na Friday\"\n\n" +
+		"*Dekọọ ịkwụ ụgwọ*\n" +
+		"e.g. \"Chinedu kwụrụ 5k\"\n\n" +
+		"*Lelee ụgwọ fọdụrụ*\n" +
+		"e.g. \"Onye ji m ụgwọ?\"\n\n" +
+		"*Lelee otu onye ahịa*\n" +
+		"e.g. \"Ego ole Chinedu ji m?\"\n\n" +
+		"Gwa m n'okwu gị, m ga-esite ebe ahụ gaa n'ihu.",
+	LangHausa: "*Rikodin siyar da kaya bisa bashi*\n" +
+		"e.g. \"Chinedu ya dauka 5k, zai biya Jumma'a\"\n\n" +
+		"*Rikodin biya*\n" +
+		"e.g. \"Chinedu ya biya 5k\"\n\n" +
+		"*Duba bashin da ya rage*\n" +
+		"e.g. \"Wa ke bin ni bashi?\"\n\n" +
+		"*Duba wani abokin ciniki*\n" +
+		"e.g. \"Nawa Chinedu ke bi na bashi?\"\n\n" +
+		"Faɗa mini a hanyarka, zan ci gaba daga nan.",
+}
+
+var helpText = withCapabilityList(map[Language]string{
+	LangEnglish: "Here's what I can help you manage:\n\n",
+	LangPidgin:  "Na dis I fit help you manage:\n\n",
+	LangYoruba:  "Ìwọ̀nyí ni mo lè ràn ọ́ lọ́wọ́ láti bójú tó:\n\n",
+	LangIgbo:    "Ihe ndị a ka m nwere ike inyere gị aka ijikwa:\n\n",
+	LangHausa:   "Ga abin da zan iya taimaka maka ka lura da su:\n\n",
+})
+
+// unsupportedRequestText is docs/BRIEF-critical-fixes-and-reminders.md
+// #1c's honest decline — "I can't do that yet — here's what I can help
+// with: [capability list]" — for IntentUnsupported, a request for
+// something Ruby genuinely doesn't do (invoicing, inventory, etc.).
+// Distinct from reminderUnsupportedText: that one is specific to a
+// recognized-but-not-yet-user-invokable feature, this one is the
+// general "that's not a thing I do at all" case.
+var unsupportedRequestText = withCapabilityList(map[Language]string{
+	LangEnglish: "I can't do that yet — here's what I can help with:\n\n",
+	LangPidgin:  "I no fit do dat one yet — na dis I fit help you with:\n\n",
+	LangYoruba:  "Mi ò tíì lè ṣe bẹ́ẹ̀ — ìwọ̀nyí ni mo lè ràn ọ́ lọ́wọ́ pẹ̀lú:\n\n",
+	LangIgbo:    "Enweghị m ike ime nke ahụ ugbu a — ihe ndị a ka m nwere ike inyere gị aka na ha:\n\n",
+	LangHausa:   "Ba zan iya yin haka ba tukuna — ga abin da zan iya taimaka maka da shi:\n\n",
+})
+
+// withCapabilityList concatenates a per-language prefix in front of the
+// shared capabilityListText body for every language, in one place, so
+// helpText/unsupportedRequestText can never end up with a language key
+// present in one but missing from the other.
+func withCapabilityList(prefixes map[Language]string) map[Language]string {
+	out := make(map[Language]string, len(prefixes))
+	for lang, prefix := range prefixes {
+		out[lang] = prefix + capabilityListText[lang]
+	}
+	return out
 }
 
 var reminderUnsupportedText = map[Language]string{
@@ -143,6 +198,85 @@ var cancelledText = map[Language]string{
 	LangHausa:   "To, an soke — ba a rubuta komai ba.",
 }
 
+// smallTalkText is docs/BRIEF-critical-fixes-and-reminders.md #3a's
+// brief, warm reply for genuine chit-chat with no real request behind
+// it — fixed, not Phraser-generated (no dynamic outcome to phrase,
+// same reasoning as helpText et al.), and deliberately short: it
+// shouldn't read as a fresh pitch (docs/BRIEF-response-quality.md #2's
+// same concern, just triggered by small talk instead of a greeting).
+var smallTalkText = map[Language]string{
+	LangEnglish: "I'm doing well, thanks for asking! How can I help with your credit sales today?",
+	LangPidgin:  "I dey kampe, thank you for ask! How I fit help you with your credit sales today?",
+	LangYoruba:  "Àlàáfíà ni, o ṣé fún bíbéèrè! Kín ni mo lè ràn ọ́ lọ́wọ́ pẹ̀lú ọjà rẹ tí a ta lórí gbèsè lónìí?",
+	LangIgbo:    "Adị m mma, daalụ maka ịjụ! Kedu ka m ga-esi nyere gị aka na ahịa gị ị na-ere n'ụgwọ taa?",
+	LangHausa:   "Ina lafiya, na gode da tambaya! Ta yaya zan iya taimaka maka da tallace-tallacenka na bashi yau?",
+}
+
+// selfQueryNameText answers docs/BRIEF-critical-fixes-and-reminders.md
+// #3b's required case directly from users.name — %s is the name, read
+// straight from the account, never guessed or phrased by the model.
+var selfQueryNameText = map[Language]string{
+	LangEnglish: "Your name is *%s*.",
+	LangPidgin:  "Your name na *%s*.",
+	LangYoruba:  "Orúkọ rẹ ni *%s*.",
+	LangIgbo:    "Aha gị bụ *%s*.",
+	LangHausa:   "Sunanka *%s* ne.",
+}
+
+// slotFillCustomerText and slotFillAmountText/slotFillAmountWithNameText
+// are the interactive slot-filling section's own questions
+// (docs/BRIEF-critical-fixes-and-reminders.md) — fixed, not Phraser-
+// generated, same reasoning as every other pending-state question
+// built this session (identity confirmation, customer-signal request,
+// reminder phone request): deterministic, no AI-call latency/cost, and
+// no grounding risk for something this simple. %s in the "with name"
+// variant is the customer name, when it's already known.
+var slotFillCustomerText = map[Language]string{
+	LangEnglish: "Who is this for?",
+	LangPidgin:  "Na who be dis for?",
+	LangYoruba:  "Ta ni èyí ṣe fún?",
+	LangIgbo:    "Onye ka nke a bụ?",
+	LangHausa:   "Wanene wannan?",
+}
+
+var slotFillAmountText = map[Language]string{
+	LangEnglish: "How much?",
+	LangPidgin:  "How much?",
+	LangYoruba:  "Èló?",
+	LangIgbo:    "Ego ole?",
+	LangHausa:   "Nawa?",
+}
+
+var slotFillAmountWithNameText = map[Language]string{
+	LangEnglish: "How much for *%s*?",
+	LangPidgin:  "How much for *%s*?",
+	LangYoruba:  "Èló fún *%s*?",
+	LangIgbo:    "Ego ole maka *%s*?",
+	LangHausa:   "Nawa domin *%s*?",
+}
+
+// slotFillCustomerReaskText and slotFillAmountReaskText are edge case
+// #3's more direct re-ask when a reply "obviously doesn't match what
+// was asked" — mirrors onboarding.go's nameReaskText, same reasoning:
+// by the time Ruby is re-asking, it's already responding to a reply
+// that didn't work, so there's no reliable language signal beyond
+// what's already established for this pending intent.
+var slotFillCustomerReaskText = map[Language]string{
+	LangEnglish: "I just need to know who this is for — what's their name?",
+	LangPidgin:  "I just need to know who dis be for — wetin be their name?",
+	LangYoruba:  "Mo kàn nílò láti mọ ẹni tí èyí ṣe fún — kí ni orúkọ wọn?",
+	LangIgbo:    "Naanị achọrọ m ịma onye nke a bụ — gịnị bụ aha ha?",
+	LangHausa:   "Ina bukatan sanin wanda wannan yake — menene sunansu?",
+}
+
+var slotFillAmountReaskText = map[Language]string{
+	LangEnglish: "I just need the amount — how much was it?",
+	LangPidgin:  "I just need the amount — how much e be?",
+	LangYoruba:  "Mo kàn nílò iye owó náà — èló ni?",
+	LangIgbo:    "Naanị achọrọ m ego ole ọ bụ — ego ole ọ bụ?",
+	LangHausa:   "Ina bukatan adadin kudi ne kawai — nawa ne?",
+}
+
 // noOutstandingDebtsText, dueLabelText, and totalOutstandingLabelText
 // back the deterministic LIST_OUTSTANDING_DEBTS formatting in format.go
 // (docs/BRIEF-response-quality.md #4) — fixed strings, not a Phraser
@@ -169,6 +303,27 @@ var totalOutstandingLabelText = map[Language]string{
 	LangYoruba:  "Àpapọ̀ tó ṣẹ́kù:",
 	LangIgbo:    "Mkpokọta fọdụrụ:",
 	LangHausa:   "Jimillar da ta rage:",
+}
+
+// noCustomersText and customerListHeaderText back the deterministic
+// LIST_CUSTOMERS formatting in format.go
+// (docs/BRIEF-critical-fixes-and-reminders.md #2a) — same reasoning as
+// noOutstandingDebtsText: a genuine empty-state message, not a Phraser
+// call left to improvise around an empty/omitted items field.
+var noCustomersText = map[Language]string{
+	LangEnglish: "You haven't added any customers yet.",
+	LangPidgin:  "You never add any customer yet.",
+	LangYoruba:  "O ò tíì fi oníbàárà kankan kún un.",
+	LangIgbo:    "Ị na-etinyebeghị onye ahịa ọ bụla.",
+	LangHausa:   "Ba ka ƙara wani abokin ciniki ba tukuna.",
+}
+
+var customerListHeaderText = map[Language]string{
+	LangEnglish: "Your customers:",
+	LangPidgin:  "Your customers:",
+	LangYoruba:  "Àwọn oníbàárà rẹ:",
+	LangIgbo:    "Ndị ahịa gị:",
+	LangHausa:   "Abokan cinikinka:",
 }
 
 // genericErrorText is spec §37's "never respond with an unexplained
