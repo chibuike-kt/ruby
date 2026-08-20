@@ -25,6 +25,7 @@ import (
 const (
 	testWhatsAppSecret      = "test-webhook-secret" //nolint:gosec // test fixture, not a real secret
 	testWhatsAppVerifyToken = "test-verify-token"
+	testWemaPartnerToken    = "test-wema-partner-token" //nolint:gosec // test fixture, not a real secret
 )
 
 // testEnv bundles a wired router with the raw pool/redis handles tests
@@ -51,6 +52,7 @@ func newTestEnv(t *testing.T) testEnv {
 		Payments:           payment.NewService(pool),
 		Webhooks:           whatsapp.NewService(pool, rdb, testWhatsAppSecret, testWhatsAppVerifyToken, "test-access-token", "test-phone-number-id", logger),
 		RateLimitPerMinute: 1000, // high enough that handler tests don't trip it; rate limiting has its own tests
+		WemaPartnerToken:   testWemaPartnerToken,
 		Logger:             logger,
 	}
 
