@@ -12,10 +12,21 @@ import (
 )
 
 // Transcriber implements ai.Transcriber against POST
-// /v1/audio/transcriptions using gpt-transcribe. langHints populate the
-// current API's "languages" (plural, array) hint field — verified
-// against current docs during planning, not the older singular
-// "language" parameter.
+// /v1/audio/transcriptions using gpt-transcribe.
+//
+// No language hint is sent (docs/BRIEF-fixes-and-reminders.md #2): an
+// earlier version wrote a repeated "languages" field, assumed from docs
+// to be the model's multi-language hint mechanism. Verified against the
+// live endpoint while debugging why every voice note failed — that
+// field (in any form: repeated "languages", or "languages[]") gets a
+// flat 400 invalid_request_error/invalid_value, every time, regardless
+// of audio content. Omitting it entirely works: the model auto-detects
+// correctly on its own.
+//
+// The response's language info also isn't the singular "language"
+// string field the same earlier assumption expected — the live
+// endpoint returns "languages": [{"code": "en"}], an array (see
+// transcriptionResponse).
 type Transcriber struct {
 	apiKey string
 }
@@ -25,11 +36,15 @@ func NewTranscriber(apiKey string) *Transcriber {
 }
 
 type transcriptionResponse struct {
-	Text     string `json:"text"`
-	Language string `json:"language"`
+	Text      string                    `json:"text"`
+	Languages []transcriptionLanguageID `json:"languages"`
 }
 
-func (t *Transcriber) Transcribe(ctx context.Context, audio []byte, langHints []ai.Language) (string, ai.Language, error) {
+type transcriptionLanguageID struct {
+	Code string `json:"code"`
+}
+
+func (t *Transcriber) Transcribe(ctx context.Context, audio []byte) (string, ai.Language, error) {
 	var body bytes.Buffer
 	w := multipart.NewWriter(&body)
 
@@ -42,11 +57,6 @@ func (t *Transcriber) Transcribe(ctx context.Context, audio []byte, langHints []
 	}
 	if err := w.WriteField("model", transcriptionModel); err != nil {
 		return "", "", err
-	}
-	for _, lang := range langHints {
-		if err := w.WriteField("languages", string(lang)); err != nil {
-			return "", "", err
-		}
 	}
 	if err := w.Close(); err != nil {
 		return "", "", err
@@ -77,5 +87,9 @@ func (t *Transcriber) Transcribe(ctx context.Context, audio []byte, langHints []
 	if err := json.Unmarshal(respBody, &parsed); err != nil {
 		return "", "", err
 	}
-	return parsed.Text, ai.Language(parsed.Language), nil
+	var detected ai.Language
+	if len(parsed.Languages) > 0 {
+		detected = ai.Language(parsed.Languages[0].Code)
+	}
+	return parsed.Text, detected, nil
 }
