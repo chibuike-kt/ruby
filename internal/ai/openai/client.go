@@ -34,6 +34,46 @@ const phrasingModel = "gpt-5.6-luna"
 // needs, well below what a runaway response could do.
 const maxResponseBytes = 1 << 20
 
+// retryBackoff is docs/BRIEF-polish-and-hardening.md #4's outbound
+// retry/backoff requirement: up to len(retryBackoff) retries (3
+// attempts total) on a transient failure — a network error, 429, or
+// 5xx — each waiting a little longer than the last. A genuine client
+// error (any other 4xx, e.g. a bad request or an auth failure) is
+// never retried: retrying can't fix a malformed request or a bad key.
+var retryBackoff = []time.Duration{200 * time.Millisecond, 500 * time.Millisecond}
+
+// doWithRetry executes newReq's request, retrying on a transient
+// failure. newReq is called fresh on every attempt (an http.Request's
+// body reader is single-use, so a retry needs a brand new one, not the
+// same request replayed).
+func doWithRetry(ctx context.Context, newReq func() (*http.Request, error)) (*http.Response, error) {
+	var lastErr error
+	for attempt := 0; ; attempt++ {
+		req, err := newReq()
+		if err != nil {
+			return nil, err
+		}
+		resp, err := httpClient.Do(req)
+		if err == nil && resp.StatusCode != http.StatusTooManyRequests && resp.StatusCode < 500 {
+			return resp, nil
+		}
+		if err != nil {
+			lastErr = err
+		} else {
+			lastErr = fmt.Errorf("openai: transient failure with status %d", resp.StatusCode)
+			_ = resp.Body.Close()
+		}
+		if attempt >= len(retryBackoff) {
+			return nil, lastErr
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(retryBackoff[attempt]):
+		}
+	}
+}
+
 type apiError struct {
 	Error struct {
 		Message string `json:"message"`
@@ -91,14 +131,15 @@ func postResponses(ctx context.Context, apiKey string, reqBody responsesRequest)
 		return "", err
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/responses", bytes.NewReader(body))
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+apiKey)
-
-	resp, err := httpClient.Do(req)
+	resp, err := doWithRetry(ctx, func() (*http.Request, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/responses", bytes.NewReader(body))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+		return req, nil
+	})
 	if err != nil {
 		return "", err
 	}

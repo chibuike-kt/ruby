@@ -1,9 +1,18 @@
 package httpserver_test
 
 import (
+	"io"
+	"log/slog"
 	"net/http"
 	"testing"
 	"time"
+
+	"github.com/chibuike-kt/ruby/internal/customer"
+	"github.com/chibuike-kt/ruby/internal/dbtest"
+	"github.com/chibuike-kt/ruby/internal/debt"
+	"github.com/chibuike-kt/ruby/internal/httpserver"
+	"github.com/chibuike-kt/ruby/internal/payment"
+	"github.com/chibuike-kt/ruby/internal/whatsapp"
 )
 
 func TestSetCreditProfileSharing_TogglesOwnAccount(t *testing.T) {
@@ -177,5 +186,42 @@ func TestGetCreditProfile_RevokedAccess_ForbiddenAgain(t *testing.T) {
 	})
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("got status %d after revoking, want 403", rec.Code)
+	}
+}
+
+// TestSetCreditProfileSharing_RateLimited is docs/BRIEF-polish-and-
+// hardening.md #4's audit item: every mutation endpoint must still be
+// rate limited after everything added this session. PATCH
+// /credit-profile-sharing (docs/wema-integration.md, added this
+// session) was found missing the rateLimited wrapper every other
+// mutation route already has — this is the regression test for that
+// fix, built with its own low-limit server rather than newTestEnv's
+// (deliberately high, so ordinary handler tests don't trip it).
+func TestSetCreditProfileSharing_RateLimited(t *testing.T) {
+	pool := dbtest.Open(t)
+	rdb := dbtest.OpenRedis(t)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	srv := &httpserver.Server{
+		Pool:               pool,
+		Redis:              rdb,
+		Customers:          customer.NewService(pool),
+		Debts:              debt.NewService(pool),
+		Payments:           payment.NewService(pool),
+		Webhooks:           whatsapp.NewService(pool, rdb, testWhatsAppSecret, testWhatsAppVerifyToken, "test-access-token", "test-phone-number-id", logger),
+		RateLimitPerMinute: 1,
+		WemaPartnerToken:   testWemaPartnerToken,
+		Logger:             logger,
+	}
+	env := testEnv{router: httpserver.NewRouter(srv), pool: pool, redis: rdb}
+	userID := env.newUser(t, "+2348090000007")
+
+	first := env.do(t, http.MethodPatch, "/api/credit-profile-sharing", userID, map[string]any{"enabled": true}, nil)
+	if first.Code != http.StatusOK {
+		t.Fatalf("got status %d on the first request, want 200, body=%s", first.Code, first.Body.String())
+	}
+
+	second := env.do(t, http.MethodPatch, "/api/credit-profile-sharing", userID, map[string]any{"enabled": false}, nil)
+	if second.Code != http.StatusTooManyRequests {
+		t.Fatalf("got status %d on the second request within the window, want 429 — this mutation endpoint must be rate limited", second.Code)
 	}
 }
