@@ -12,6 +12,12 @@ const defaultRateLimitPerMinute = 30
 const defaultAIModel = "gpt-5.6-terra"
 const defaultTimezone = "Africa/Lagos"
 
+// defaultReminderTemplateName is a placeholder until a real template is
+// submitted and approved by Meta (docs/BRIEF-fixes-and-reminders.md
+// #4) — configurable via WHATSAPP_REMINDER_TEMPLATE_NAME so swapping in
+// the approved name is a config change, not a code change.
+const defaultReminderTemplateName = "debt_reminder"
+
 type Config struct {
 	Port               string
 	Env                string
@@ -42,6 +48,21 @@ type Config struct {
 	// DefaultTimezone resolves relative due dates ("Friday") against a
 	// concrete "today" before they ever reach the AI prompt (spec §21).
 	DefaultTimezone string
+
+	// ReminderTemplateName is the Meta-approved WhatsApp template every
+	// reminder is sent through (docs/BRIEF-fixes-and-reminders.md #4).
+	// Until a real one is approved, Dispatch will fail every send with
+	// a real Cloud API error naming this template — see
+	// internal/reminder.Service.Dispatch's doc comment.
+	ReminderTemplateName string
+
+	// WemaPartnerToken authenticates the Credit Profile API
+	// (docs/wema-integration.md) — a static bearer token for the demo,
+	// stubbing what would be a proper OAuth2 client-credentials flow
+	// issued to Wema specifically in production. Empty means the
+	// endpoint fails closed (rejects everything), same reasoning as
+	// WhatsAppAppSecret/WhatsAppVerifyToken above.
+	WemaPartnerToken string
 }
 
 func Load() (Config, error) {
@@ -58,6 +79,8 @@ func Load() (Config, error) {
 		AIProviderAPIKey:      os.Getenv("AI_PROVIDER_API_KEY"),
 		AIModel:               getEnv("AI_MODEL", defaultAIModel),
 		DefaultTimezone:       getEnv("DEFAULT_TIMEZONE", defaultTimezone),
+		ReminderTemplateName:  getEnv("WHATSAPP_REMINDER_TEMPLATE_NAME", defaultReminderTemplateName),
+		WemaPartnerToken:      os.Getenv("WEMA_PARTNER_TOKEN"),
 	}
 	if cfg.DatabaseURL == "" {
 		return Config{}, fmt.Errorf("config: DATABASE_URL is required")
