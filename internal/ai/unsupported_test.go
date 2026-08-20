@@ -40,10 +40,13 @@ func TestProcessor_Unsupported_HonestDecline(t *testing.T) {
 	}
 	// Same underlying capability list as HELP, so the decline is
 	// concrete, not a vague "I can't help."
-	for _, want := range []string{"Record a debt", "Record a payment", "who owes"} {
+	for _, want := range []string{"Record a sale on credit", "Log a payment", "Who owes"} {
 		if !strings.Contains(reply.Text, want) {
 			t.Fatalf("got reply %q, want it to include the capability list (e.g. %q)", reply.Text, want)
 		}
+	}
+	if len(reply.Buttons) != 3 {
+		t.Fatalf("got %d buttons on the unsupported-request decline, want 3 (docs/BRIEF-polish-and-hardening.md #3: the same greeting-menu quick actions, every time this content appears)", len(reply.Buttons))
 	}
 	if len(phraser.inputs) != 0 {
 		t.Fatalf("got %d Phraser calls for an unsupported request, want 0 — it's a fixed response", len(phraser.inputs))

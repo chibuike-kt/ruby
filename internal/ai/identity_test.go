@@ -199,3 +199,73 @@ func TestProcessor_IdentityConfirmation_GetCustomerBalance_DoesNotTrigger(t *tes
 		t.Fatalf("got phrase event %v, want EventCustomerBalance", phraser.last().Event)
 	}
 }
+
+// TestProcessor_IdentityConfirmation_FreeText_Same is docs/BRIEF-
+// polish-and-hardening.md #3's required free-text fallback: typing
+// "yes" must resolve identity confirmation exactly like tapping "Same
+// person" does — buttons are additive, never a replacement.
+func TestProcessor_IdentityConfirmation_FreeText_Same(t *testing.T) {
+	pool := dbtest.Open(t)
+	rdb := dbtest.OpenRedis(t)
+	userID := dbtest.CreateUser(t, pool, "+2348060000006")
+	customers := customer.NewService(pool)
+	existing, err := customers.Create(context.Background(), userID, "Chinedu", nil, nil)
+	if err != nil {
+		t.Fatalf("seed customer: %v", err)
+	}
+
+	extractor := &fakeExtractor{results: []ai.RawIntent{
+		{Intent: ai.IntentCreateDebt, CustomerName: new("Chinedu"), AmountMinor: new(int64(5000000)), Confidence: ai.ConfidenceHigh, Language: ai.LangEnglish},
+	}}
+	phraser := &fakePhraser{}
+	sender := &fakeSender{}
+	p := newTestProcessor(pool, rdb, extractor, phraser, sender)
+
+	if _, err := p.Handle(context.Background(), ai.ToInboundMessage(userID, "wamid.identity.6a", "text", new("Chinedu took 50k"))); err != nil {
+		t.Fatalf("Handle (first message): %v", err)
+	}
+	if _, err := p.Handle(context.Background(), ai.ToInboundMessage(userID, "wamid.identity.6b", "text", new("yes"))); err != nil {
+		t.Fatalf("Handle (free-text yes): %v", err)
+	}
+
+	if got := countRows(t, pool, `SELECT count(*) FROM customers WHERE user_id = $1`, userID); got != 1 {
+		t.Fatalf("got %d customers, want 1 (still just the existing one, not a duplicate)", got)
+	}
+	if got := countRows(t, pool, `SELECT count(*) FROM debts WHERE customer_id = $1`, existing.ID); got != 1 {
+		t.Fatalf("got %d debts against the existing customer, want 1", got)
+	}
+}
+
+// TestProcessor_IdentityConfirmation_FreeText_Unclear re-asks (with the
+// same buttons) rather than silently dropping a reply that isn't
+// classifiable as yes or no.
+func TestProcessor_IdentityConfirmation_FreeText_Unclear(t *testing.T) {
+	pool := dbtest.Open(t)
+	rdb := dbtest.OpenRedis(t)
+	userID := dbtest.CreateUser(t, pool, "+2348060000007")
+	customers := customer.NewService(pool)
+	if _, err := customers.Create(context.Background(), userID, "Chinedu", nil, nil); err != nil {
+		t.Fatalf("seed customer: %v", err)
+	}
+
+	extractor := &fakeExtractor{results: []ai.RawIntent{
+		{Intent: ai.IntentCreateDebt, CustomerName: new("Chinedu"), AmountMinor: new(int64(5000000)), Confidence: ai.ConfidenceHigh, Language: ai.LangEnglish},
+	}}
+	phraser := &fakePhraser{}
+	sender := &fakeSender{}
+	p := newTestProcessor(pool, rdb, extractor, phraser, sender)
+
+	if _, err := p.Handle(context.Background(), ai.ToInboundMessage(userID, "wamid.identity.7a", "text", new("Chinedu took 50k"))); err != nil {
+		t.Fatalf("Handle (first message): %v", err)
+	}
+	reask, err := p.Handle(context.Background(), ai.ToInboundMessage(userID, "wamid.identity.7b", "text", new("blah blah")))
+	if err != nil {
+		t.Fatalf("Handle (unclear reply): %v", err)
+	}
+	if !strings.Contains(reask.Text, "Chinedu") || len(reask.Buttons) != 2 {
+		t.Fatalf("got reply %+v, want the same/new prompt re-asked with 2 buttons", reask)
+	}
+	if got := countRows(t, pool, `SELECT count(*) FROM debts`); got != 0 {
+		t.Fatalf("got %d debts, want 0 — an unclear reply must not be treated as an answer", got)
+	}
+}
