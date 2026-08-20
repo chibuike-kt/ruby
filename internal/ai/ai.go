@@ -26,6 +26,25 @@ const (
 	IntentCancelReminder       IntentType = "CANCEL_REMINDER"
 	IntentConfirmAction        IntentType = "CONFIRM_ACTION"
 	IntentHelp                 IntentType = "HELP"
+
+	// IntentUnsupported is docs/BRIEF-critical-fixes-and-reminders.md
+	// #1c's structural guard: a request for something Ruby genuinely
+	// doesn't do (invoicing, inventory, expense tracking, anything
+	// outside bookkeeping for credit sales) must land here, explicitly,
+	// rather than being force-fit into the closest-sounding real intent
+	// and then improvised into a fake multi-turn flow via slot-filling.
+	// Distinct from HELP (an explicit "what can you do" ask) and from
+	// CREATE_REMINDER/CANCEL_REMINDER (a recognized-but-not-yet-
+	// user-invokable feature, handled separately).
+	IntentUnsupported IntentType = "UNSUPPORTED"
+
+	// IntentSmallTalk and IntentSelfQuery are #3a/#3b's split of what
+	// used to all collapse into the same catch-all: genuine chit-chat
+	// ("how are you") gets a brief warm reply, not the capability list;
+	// a question Ruby can actually answer from its own stored data
+	// ("what's my name") gets a real answer, not a decline.
+	IntentSmallTalk IntentType = "SMALL_TALK"
+	IntentSelfQuery IntentType = "SELF_QUERY"
 )
 
 // Confidence mirrors spec §23: the model's own signal for how sure it is

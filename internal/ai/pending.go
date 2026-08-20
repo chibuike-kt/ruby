@@ -36,6 +36,14 @@ const (
 	// already on file — the follow-up asking for one.
 	PendingReminderOptIn         PendingKind = "reminder_opt_in"
 	PendingAwaitingReminderPhone PendingKind = "awaiting_reminder_phone"
+
+	// PendingSlotFill is the interactive slot-filling section's own
+	// state (docs/BRIEF-critical-fixes-and-reminders.md): CREATE_DEBT
+	// or RECORD_PAYMENT is missing a required field (customer identity
+	// or amount — see slotfill.go). Intent carries the partial intent
+	// being built up across replies; no new fields needed on
+	// PendingAction beyond what already exists.
+	PendingSlotFill PendingKind = "slot_fill"
 )
 
 // PendingCandidateOption is one candidate in a disambiguation prompt —

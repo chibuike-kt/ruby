@@ -28,13 +28,26 @@ func NewService(q db.Querier) *Service {
 }
 
 func (s *Service) Create(ctx context.Context, userID int64, name string, phone, alias *string) (Customer, error) {
+	return CreateChecked(ctx, s.q, userID, name, phone, alias)
+}
+
+// CreateChecked applies decisions.md #8's duplicate-name guard and
+// inserts the customer, against whatever db.Querier it's given — a
+// package-level function (Service.Create is now a one-line wrapper
+// around it) so a caller that's already inside a transaction can
+// participate in it instead of committing a customer row before its
+// own transaction even starts. See internal/ai's atomic customer+debt
+// creation (docs/BRIEF-critical-fixes-and-reminders.md #1b) for why
+// this matters: without it, a debt-creation failure right after
+// auto-creating a customer orphans that customer row.
+func CreateChecked(ctx context.Context, q db.Querier, userID int64, name string, phone, alias *string) (Customer, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return Customer{}, ErrInvalidName
 	}
 
 	if trimmed(phone) == "" && trimmed(alias) == "" {
-		existing, err := FindByName(ctx, s.q, userID, name)
+		existing, err := FindByName(ctx, q, userID, name)
 		if err != nil {
 			return Customer{}, err
 		}
@@ -43,7 +56,7 @@ func (s *Service) Create(ctx context.Context, userID int64, name string, phone, 
 		}
 	}
 
-	return Create(ctx, s.q, Customer{UserID: userID, Name: name, PhoneNumber: phone, Alias: alias})
+	return Create(ctx, q, Customer{UserID: userID, Name: name, PhoneNumber: phone, Alias: alias})
 }
 
 // Ref identifies a customer via one of the signals from spec §8, in

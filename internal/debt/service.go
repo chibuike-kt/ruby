@@ -38,7 +38,8 @@ func (s *Service) Create(ctx context.Context, userID, customerID int64, amount m
 
 	var created Debt
 	err := db.WithTx(ctx, s.pool, func(ctx context.Context, tx pgx.Tx) error {
-		d, err := Create(ctx, tx, Debt{
+		var err error
+		created, err = CreateWithLedger(ctx, tx, Debt{
 			UserID:      userID,
 			CustomerID:  customerID,
 			Amount:      amount,
@@ -46,24 +47,34 @@ func (s *Service) Create(ctx context.Context, userID, customerID int64, amount m
 			DueDate:     dueDate,
 			Status:      StatusOutstanding,
 		})
-		if err != nil {
-			return err
-		}
-
-		if _, err := ledger.Insert(ctx, tx, ledger.Entry{
-			UserID:      userID,
-			DebtID:      &d.ID,
-			Type:        ledger.EntryDebtCreated,
-			AmountMinor: amount.MinorUnits(),
-			Currency:    string(amount.Currency()),
-		}); err != nil {
-			return err
-		}
-
-		created = d
-		return nil
+		return err
 	})
 	if err != nil {
+		return Debt{}, err
+	}
+	return created, nil
+}
+
+// CreateWithLedger inserts a debt and its DEBT_CREATED ledger entry
+// against whatever db.Querier it's given — Service.Create wraps this in
+// its own transaction for standalone use; a caller that needs the debt
+// write to be atomic with something else (e.g. internal/ai's
+// customer-then-debt sequence, docs/BRIEF-critical-fixes-and-
+// reminders.md #1b) passes its own tx instead, so a failure anywhere in
+// that wider sequence rolls back the debt (and ledger entry) too, not
+// just the part debt.Service happened to wrap itself.
+func CreateWithLedger(ctx context.Context, q db.Querier, d Debt) (Debt, error) {
+	created, err := Create(ctx, q, d)
+	if err != nil {
+		return Debt{}, err
+	}
+	if _, err := ledger.Insert(ctx, q, ledger.Entry{
+		UserID:      d.UserID,
+		DebtID:      &created.ID,
+		Type:        ledger.EntryDebtCreated,
+		AmountMinor: d.Amount.MinorUnits(),
+		Currency:    string(d.Amount.Currency()),
+	}); err != nil {
 		return Debt{}, err
 	}
 	return created, nil

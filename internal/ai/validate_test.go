@@ -39,6 +39,12 @@ func TestValidate_CreateDebt_NewCustomer(t *testing.T) {
 	if debtAction.Amount.MinorUnits() != 7500000 {
 		t.Fatalf("got amount %d, want 7500000", debtAction.Amount.MinorUnits())
 	}
+	// docs/BRIEF-critical-fixes-and-reminders.md #1a: DueDateISO was
+	// never set on the RawIntent above — this must resolve to nil, not
+	// an error and not an invented date.
+	if debtAction.DueDate != nil {
+		t.Fatalf("got due date %v for a message with no due date at all, want nil", debtAction.DueDate)
+	}
 }
 
 // TestValidate_CreateDebt_ExistingCustomer_NeedsIdentityConfirmation is
@@ -254,6 +260,7 @@ func TestValidate_ReadOnlyIntents(t *testing.T) {
 		{ai.IntentGetTotalOutstanding, ai.GetTotalOutstandingAction{}},
 		{ai.IntentGetPaymentSummary, ai.GetPaymentSummaryAction{}},
 		{ai.IntentHelp, ai.HelpAction{}},
+		{ai.IntentUnsupported, ai.UnsupportedAction{Intent: ai.IntentUnsupported}},
 	}
 	for _, tc := range cases {
 		action, err := v.Validate(context.Background(), userID, ai.RawIntent{Intent: tc.intent, Language: ai.LangEnglish}, ai.ContextHint{})

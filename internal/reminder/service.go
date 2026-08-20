@@ -18,23 +18,39 @@ type TemplateSender interface {
 	SendTemplate(ctx context.Context, to, templateName, languageCode string, bodyParams []string) (providerMessageID string, err error)
 }
 
-// Service schedules and dispatches debt-creation reminder opt-ins
-// (docs/BRIEF-fixes-and-reminders.md #4).
+// Service schedules and dispatches the full reminder system
+// (docs/BRIEF-critical-fixes-and-reminders.md): automatic trader
+// reminders whenever a debt gets a due date, and opt-in customer
+// reminders (docs/BRIEF-fixes-and-reminders.md #4).
 type Service struct {
-	pool         *pgxpool.Pool
-	sender       TemplateSender
-	templateName string
+	pool                 *pgxpool.Pool
+	sender               TemplateSender
+	customerTemplateName string
+	traderTemplateName   string
 }
 
-// NewService wires a Service. templateName names the Meta-approved
-// template every reminder is sent through — see Config.ReminderTemplateName.
-func NewService(pool *pgxpool.Pool, sender TemplateSender, templateName string) *Service {
-	return &Service{pool: pool, sender: sender, templateName: templateName}
+// NewService wires a Service. customerTemplateName and
+// traderTemplateName are the two Meta-approved templates every
+// reminder is sent through — separate templates because the two
+// message bodies are genuinely different (spec §18's own two examples:
+// the customer's names the trader's business, the trader's names the
+// customer and reads more like an internal notice).
+func NewService(pool *pgxpool.Pool, sender TemplateSender, customerTemplateName, traderTemplateName string) *Service {
+	return &Service{pool: pool, sender: sender, customerTemplateName: customerTemplateName, traderTemplateName: traderTemplateName}
 }
 
-// OptIn schedules the two reminders a trader's "yes" answer requires.
+// OptIn schedules the two customer reminders a trader's "yes" answer
+// requires (docs/BRIEF-fixes-and-reminders.md #4).
 func (s *Service) OptIn(ctx context.Context, debtID, customerID int64, dueDate time.Time) ([]Reminder, error) {
-	return Schedule(ctx, s.pool, debtID, customerID, dueDate, s.templateName)
+	return ScheduleCustomer(ctx, s.pool, debtID, customerID, dueDate, s.customerTemplateName)
+}
+
+// ScheduleTraderReminders schedules the two automatic trader reminders
+// every debt with a due date gets — no opt-in, no consent question:
+// this is the trader's own data reflected back to them
+// (docs/BRIEF-critical-fixes-and-reminders.md's full reminder system).
+func (s *Service) ScheduleTraderReminders(ctx context.Context, debtID, userID int64, dueDate time.Time) ([]Reminder, error) {
+	return ScheduleTrader(ctx, s.pool, debtID, userID, dueDate, s.traderTemplateName)
 }
 
 // dispatchBatchSize bounds one Dispatch call so a large backlog (e.g.
@@ -50,17 +66,33 @@ const dispatchBatchSize = 100
 // approved variants is out of scope for this slice.
 const reminderLanguageCode = "en"
 
+// relativeDayWord picks "today" or "tomorrow" for the trader
+// template's own wording (spec §18: "Chinedu's ₦75,000 payment is due
+// today") — the two scheduled times (day-before, due-date) are the only
+// two values this can ever be, computed from which one this row is
+// rather than stored as its own column.
+func relativeDayWord(scheduledAt, dueDate time.Time) string {
+	if scheduledAt.Year() == dueDate.Year() && scheduledAt.YearDay() == dueDate.YearDay() {
+		return "today"
+	}
+	return "tomorrow"
+}
+
 // Dispatch sends every reminder due at or before now, via the
-// templated-message API shape (docs/BRIEF-fixes-and-reminders.md #4) —
-// never freeform text, since the customer has never messaged Ruby and
-// this is a business-initiated conversation from message one.
+// templated-message API shape — never freeform text, for either
+// recipient (docs/BRIEF-critical-fixes-and-reminders.md: "The WhatsApp
+// template constraint applies to both trader and customer reminders").
+// Status moves through spec §20's state machine: SCHEDULED ->
+// PROCESSING (claimed, so a second concurrent dispatcher can't also
+// send it) -> SENT or FAILED, with failure reason and attempt count
+// recorded on failure. A reminder for a debt that's already SETTLED is
+// CANCELLED instead of sent — reminding someone about a paid-off debt
+// would be a real, visible mistake, not just an unsent message.
 //
 // If no template has been approved by Meta yet in this environment,
 // every send here fails with a real, expected error from the Cloud
 // API — that's the honest failure mode the brief asks for, not
-// something this method papers over: it's recorded via MarkFailed
-// (attempts, failure_reason) exactly like any other send failure, not
-// silently dropped or faked as success.
+// something this method papers over.
 func (s *Service) Dispatch(ctx context.Context, now time.Time) (sent, failed int, err error) {
 	candidates, err := DueForDispatch(ctx, s.pool, now, dispatchBatchSize)
 	if err != nil {
@@ -68,29 +100,60 @@ func (s *Service) Dispatch(ctx context.Context, now time.Time) (sent, failed int
 	}
 
 	for _, c := range candidates {
-		if c.CustomerPhone == "" {
-			if markErr := MarkFailed(ctx, s.pool, c.Reminder.ID, "customer has no phone number on file"); markErr != nil {
-				return sent, failed, markErr
+		claimed, claimErr := MarkProcessing(ctx, s.pool, c.Reminder.ID)
+		if claimErr != nil {
+			return sent, failed, claimErr
+		}
+		if !claimed {
+			// Already claimed by a concurrent dispatch run — skip, not
+			// a failure.
+			continue
+		}
+
+		if c.DebtSettled {
+			if err := MarkCancelled(ctx, s.pool, c.Reminder.ID, "debt already settled before this reminder fired"); err != nil {
+				return sent, failed, err
+			}
+			continue
+		}
+
+		if c.RecipientPhone == "" {
+			if err := MarkFailed(ctx, s.pool, c.Reminder.ID, "recipient has no phone number on file"); err != nil {
+				return sent, failed, err
 			}
 			failed++
 			continue
 		}
 
-		params := []string{c.CustomerName, money.FormatNaira(c.AmountMinor), c.DueDate.Format("2 Jan")}
-		providerMessageID, sendErr := s.sender.SendTemplate(ctx, c.CustomerPhone, c.Reminder.Template, reminderLanguageCode, params)
+		templateName, params := s.templateAndParams(c)
+		providerMessageID, sendErr := s.sender.SendTemplate(ctx, c.RecipientPhone, templateName, reminderLanguageCode, params)
 		if sendErr != nil {
-			if markErr := MarkFailed(ctx, s.pool, c.Reminder.ID, sendErr.Error()); markErr != nil {
-				return sent, failed, markErr
+			if err := MarkFailed(ctx, s.pool, c.Reminder.ID, sendErr.Error()); err != nil {
+				return sent, failed, err
 			}
 			failed++
 			continue
 		}
 
-		if markErr := MarkSent(ctx, s.pool, c.Reminder.ID, providerMessageID, time.Now()); markErr != nil {
-			return sent, failed, markErr
+		if err := MarkSent(ctx, s.pool, c.Reminder.ID, providerMessageID, time.Now()); err != nil {
+			return sent, failed, err
 		}
 		sent++
 	}
 
 	return sent, failed, nil
+}
+
+// templateAndParams picks the right Meta-approved template and its
+// body parameters for c's recipient type — the two templates have
+// genuinely different bodies (spec §18's two examples), so they're
+// never interchangeable.
+func (s *Service) templateAndParams(c DispatchCandidate) (string, []string) {
+	amount := money.FormatNaira(c.AmountMinor)
+	switch c.Reminder.RecipientType {
+	case RecipientTrader:
+		return s.traderTemplateName, []string{c.CustomerName, amount, relativeDayWord(c.Reminder.ScheduledAt, c.DueDate)}
+	default: // RecipientCustomer
+		return s.customerTemplateName, []string{c.CustomerName, amount, c.TraderName, c.DueDate.Format("2 Jan")}
+	}
 }

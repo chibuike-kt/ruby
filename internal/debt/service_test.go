@@ -53,6 +53,31 @@ func TestCreate_Success(t *testing.T) {
 	}
 }
 
+// TestCreate_NoDueDate is docs/BRIEF-critical-fixes-and-reminders.md
+// #1a's own requirement, made explicit: a nil due date is a normal,
+// valid record (spec §21 — "Ruby records the debt but should not
+// invent a due date"), not an error condition. TestCreate_Success
+// already exercises this implicitly (its own dueDate arg is nil); this
+// test exists so the requirement is asserted by name, not just
+// incidentally covered.
+func TestCreate_NoDueDate(t *testing.T) {
+	pool := dbtest.Open(t)
+	userID := dbtest.CreateUser(t, pool, "+2348020000099")
+	cust := setupCustomer(t, pool, userID)
+	svc := debt.NewService(pool)
+
+	d, err := svc.Create(context.Background(), userID, cust.ID, money.New(5000000, money.NGN), "no due date given", nil)
+	if err != nil {
+		t.Fatalf("unexpected error creating a debt with no due date: %v", err)
+	}
+	if d.DueDate != nil {
+		t.Fatalf("got due date %v, want nil — never invent one", d.DueDate)
+	}
+	if d.Status != debt.StatusOutstanding {
+		t.Fatalf("got status %s, want OUTSTANDING", d.Status)
+	}
+}
+
 func TestCreate_InvalidAmount(t *testing.T) {
 	pool := dbtest.Open(t)
 	userID := dbtest.CreateUser(t, pool, "+2348020000002")
