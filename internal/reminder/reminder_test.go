@@ -233,7 +233,7 @@ func TestDispatch_SendsCustomerReminderViaTemplate(t *testing.T) {
 	}
 
 	sender := &fakeTemplateSender{}
-	svc := reminder.NewService(pool, sender, "debt_reminder_customer", "debt_reminder_trader")
+	svc := reminder.NewService(pool, sender, "debt_reminder_customer", "debt_reminder_trader", "weekly_digest")
 
 	sent, failed, err := svc.Dispatch(context.Background(), time.Now())
 	if err != nil {
@@ -280,7 +280,7 @@ func TestDispatch_SendsTraderReminderViaTemplate(t *testing.T) {
 	}
 
 	sender := &fakeTemplateSender{}
-	svc := reminder.NewService(pool, sender, "debt_reminder_customer", "debt_reminder_trader")
+	svc := reminder.NewService(pool, sender, "debt_reminder_customer", "debt_reminder_trader", "weekly_digest")
 
 	sent, failed, err := svc.Dispatch(context.Background(), time.Now())
 	if err != nil {
@@ -324,7 +324,7 @@ func TestDispatch_SettledDebt_Cancelled(t *testing.T) {
 	_ = userID
 
 	sender := &fakeTemplateSender{}
-	svc := reminder.NewService(pool, sender, "debt_reminder_customer", "debt_reminder_trader")
+	svc := reminder.NewService(pool, sender, "debt_reminder_customer", "debt_reminder_trader", "weekly_digest")
 
 	sent, failed, err := svc.Dispatch(context.Background(), time.Now())
 	if err != nil {
@@ -355,7 +355,7 @@ func TestDispatch_SendFailure_MarksFailedNotSilently(t *testing.T) {
 	}
 
 	sender := &fakeTemplateSender{err: errUnapprovedTemplate}
-	svc := reminder.NewService(pool, sender, "debt_reminder_customer", "debt_reminder_trader")
+	svc := reminder.NewService(pool, sender, "debt_reminder_customer", "debt_reminder_trader", "weekly_digest")
 
 	sent, failed, err := svc.Dispatch(context.Background(), time.Now())
 	if err != nil {
