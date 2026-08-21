@@ -48,10 +48,37 @@ type Sender interface {
 	SendText(ctx context.Context, to, body string) error
 	SendButtons(ctx context.Context, to, body string, buttons []Button) error
 	SendList(ctx context.Context, to, body, buttonLabel string, sections []ListSection) error
+	// SendAudio sends already-synthesized speech (see Speaker) as a
+	// WhatsApp audio message — docs/BRIEF-research-hardening-standard.md
+	// Part 5 Tier 1's voice replies.
+	SendAudio(ctx context.Context, to string, audio []byte, mimeType string) error
 }
 
 // MediaDownloader fetches the bytes behind a WhatsApp media id (spec
 // §22's "WhatsApp Media API" step). Satisfied by *whatsapp.Service.
 type MediaDownloader interface {
 	DownloadMedia(ctx context.Context, mediaID string) (data []byte, mimeType string, err error)
+}
+
+// Speaker synthesizes speech from already-phrased reply text — the
+// reverse direction of Transcriber, used for docs/BRIEF-research-
+// hardening-standard.md Part 5 Tier 1's voice replies. No raw trader
+// text ever reaches it, same boundary Phraser already keeps (plan
+// decision #7): only text Ruby itself decided to say.
+type Speaker interface {
+	Speak(ctx context.Context, text string) (audio []byte, mimeType string, err error)
+}
+
+// VisionExtractor turns a photo into however many transactions it shows
+// — docs/BRIEF-research-hardening-standard.md Part 5 Tier 1's photo
+// input, properly resolving the earlier-declined multi-transaction
+// question: a photo of a ledger page or a handful of handwritten IOUs
+// can show several transactions at once, unlike a single WhatsApp text
+// or voice message. Each element is the same RawIntent shape Extractor
+// already produces, so every transaction runs through the exact same
+// untrusted-DTO validation/confirmation pipeline (internal/ai's own
+// architectural rule) — there is no separate, less-trusted path for
+// vision-derived data.
+type VisionExtractor interface {
+	ExtractFromImage(ctx context.Context, image []byte, mimeType string) ([]RawIntent, error)
 }

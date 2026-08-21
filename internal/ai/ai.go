@@ -53,6 +53,15 @@ const (
 	// ("what's my name") gets a real answer, not a decline.
 	IntentSmallTalk IntentType = "SMALL_TALK"
 	IntentSelfQuery IntentType = "SELF_QUERY"
+
+	// IntentDataSafety is docs/BRIEF-research-hardening-standard.md Part
+	// 4's trust-building answer: "is my data safe"/"is this secure" as a
+	// real, classified intent — a plain, factual answer built once as
+	// fixed text (see dataSafetyText), never left to the Phraser to
+	// improvise or overclaim a certification Ruby doesn't have. Distinct
+	// from HELP (what Ruby does) and SMALL_TALK (no real question behind
+	// it) — this is a genuine question with a genuine answer.
+	IntentDataSafety IntentType = "DATA_SAFETY"
 )
 
 // Confidence mirrors spec §23: the model's own signal for how sure it is
