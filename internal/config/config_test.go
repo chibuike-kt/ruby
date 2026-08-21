@@ -15,6 +15,7 @@ func TestLoad_Defaults(t *testing.T) {
 	t.Setenv("DEFAULT_TIMEZONE", "")
 	t.Setenv("WHATSAPP_CUSTOMER_REMINDER_TEMPLATE_NAME", "")
 	t.Setenv("WHATSAPP_TRADER_REMINDER_TEMPLATE_NAME", "")
+	t.Setenv("WHATSAPP_WEEKLY_DIGEST_TEMPLATE_NAME", "")
 
 	cfg, err := config.Load()
 	if err != nil {
@@ -37,6 +38,9 @@ func TestLoad_Defaults(t *testing.T) {
 	}
 	if cfg.TraderReminderTemplateName != "debt_reminder_trader" {
 		t.Fatalf("got trader reminder template name %q, want debt_reminder_trader", cfg.TraderReminderTemplateName)
+	}
+	if cfg.WeeklyDigestTemplateName != "weekly_digest" {
+		t.Fatalf("got weekly digest template name %q, want weekly_digest", cfg.WeeklyDigestTemplateName)
 	}
 }
 

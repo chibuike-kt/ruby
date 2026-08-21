@@ -20,13 +20,18 @@ type TemplateSender interface {
 
 // Service schedules and dispatches the full reminder system
 // (docs/BRIEF-critical-fixes-and-reminders.md): automatic trader
-// reminders whenever a debt gets a due date, and opt-in customer
-// reminders (docs/BRIEF-fixes-and-reminders.md #4).
+// reminders whenever a debt gets a due date, opt-in customer reminders
+// (docs/BRIEF-fixes-and-reminders.md #4), and the proactive weekly
+// digest (docs/BRIEF-research-hardening-standard.md Part 5 Tier 1) —
+// reusing this same Service and its TemplateSender rather than new
+// scheduling infrastructure, since a digest is business-initiated and
+// unprompted exactly like a reminder.
 type Service struct {
 	pool                 *pgxpool.Pool
 	sender               TemplateSender
 	customerTemplateName string
 	traderTemplateName   string
+	digestTemplateName   string
 }
 
 // NewService wires a Service. customerTemplateName and
@@ -34,9 +39,10 @@ type Service struct {
 // reminder is sent through — separate templates because the two
 // message bodies are genuinely different (spec §18's own two examples:
 // the customer's names the trader's business, the trader's names the
-// customer and reads more like an internal notice).
-func NewService(pool *pgxpool.Pool, sender TemplateSender, customerTemplateName, traderTemplateName string) *Service {
-	return &Service{pool: pool, sender: sender, customerTemplateName: customerTemplateName, traderTemplateName: traderTemplateName}
+// customer and reads more like an internal notice). digestTemplateName
+// is the weekly digest's own template (see DispatchDigests).
+func NewService(pool *pgxpool.Pool, sender TemplateSender, customerTemplateName, traderTemplateName, digestTemplateName string) *Service {
+	return &Service{pool: pool, sender: sender, customerTemplateName: customerTemplateName, traderTemplateName: traderTemplateName, digestTemplateName: digestTemplateName}
 }
 
 // OptIn schedules the two customer reminders a trader's "yes" answer

@@ -23,6 +23,13 @@ const defaultTimezone = "Africa/Lagos"
 const defaultCustomerReminderTemplateName = "debt_reminder_customer"
 const defaultTraderReminderTemplateName = "debt_reminder_trader"
 
+// defaultWeeklyDigestTemplateName is the same placeholder-until-approved
+// pattern as the two reminder templates above — docs/BRIEF-research-
+// hardening-standard.md Part 5 Tier 1's proactive weekly digest is also
+// business-initiated and unprompted, so it needs its own Meta-approved
+// template, not freeform text.
+const defaultWeeklyDigestTemplateName = "weekly_digest"
+
 type Config struct {
 	Port               string
 	Env                string
@@ -64,6 +71,11 @@ type Config struct {
 	CustomerReminderTemplateName string
 	TraderReminderTemplateName   string
 
+	// WeeklyDigestTemplateName is the Meta-approved template Part 5 Tier
+	// 1's proactive weekly digest sends through — same until-approved
+	// caveat as the two reminder templates above.
+	WeeklyDigestTemplateName string
+
 	// WemaPartnerToken authenticates the Credit Profile API
 	// (docs/wema-integration.md) — a static bearer token for the demo,
 	// stubbing what would be a proper OAuth2 client-credentials flow
@@ -89,6 +101,7 @@ func Load() (Config, error) {
 		DefaultTimezone:              getEnv("DEFAULT_TIMEZONE", defaultTimezone),
 		CustomerReminderTemplateName: getEnv("WHATSAPP_CUSTOMER_REMINDER_TEMPLATE_NAME", defaultCustomerReminderTemplateName),
 		TraderReminderTemplateName:   getEnv("WHATSAPP_TRADER_REMINDER_TEMPLATE_NAME", defaultTraderReminderTemplateName),
+		WeeklyDigestTemplateName:     getEnv("WHATSAPP_WEEKLY_DIGEST_TEMPLATE_NAME", defaultWeeklyDigestTemplateName),
 		WemaPartnerToken:             os.Getenv("WEMA_PARTNER_TOKEN"),
 	}
 	if cfg.DatabaseURL == "" {

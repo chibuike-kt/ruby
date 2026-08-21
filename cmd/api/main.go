@@ -56,7 +56,7 @@ func main() {
 	// whatsappService satisfies reminder.TemplateSender structurally —
 	// same one-directional-import shape as ai.Sender/ai.MediaDownloader
 	// above (plan decision #10).
-	reminders := reminder.NewService(pool, whatsappService, cfg.CustomerReminderTemplateName, cfg.TraderReminderTemplateName)
+	reminders := reminder.NewService(pool, whatsappService, cfg.CustomerReminderTemplateName, cfg.TraderReminderTemplateName, cfg.WeeklyDigestTemplateName)
 
 	// The AI processor needs whatsappService (to send replies / download
 	// media) and whatsappService needs the processor (to handle inbound
@@ -83,6 +83,8 @@ func main() {
 		Phraser:     openai.NewPhraser(cfg.AIProviderAPIKey),
 		Sender:      whatsappService,
 		Media:       whatsappService,
+		Speaker:     openai.NewSpeaker(cfg.AIProviderAPIKey),
+		Vision:      openai.NewVisionExtractor(cfg.AIProviderAPIKey, cfg.AIModel, cfg.DefaultTimezone),
 		Pool:        pool,
 		Redis:       redisClient,
 		Customers:   customers,
@@ -148,7 +150,12 @@ const reminderDispatchInterval = time.Minute
 // than this slice needs. Every send failure (most likely: no
 // Meta-approved template yet — see reminder.Service.Dispatch) is logged
 // but never fatal — a quiet minute is the expected common case, not an
-// error.
+// error. The same tick also drives the proactive weekly digest (docs/
+// BRIEF-research-hardening-standard.md Part 5 Tier 1) — reusing this
+// exact ticker rather than standing up a second one: usersDueForDigest
+// is a cheap, bounded query that's a no-op for every trader not yet due
+// for their next digest, the same "a minute's resolution is more than
+// sufficient" reasoning reminder dispatch already relies on.
 func runReminderDispatcher(ctx context.Context, reminders *reminder.Service, logger *slog.Logger) {
 	ticker := time.NewTicker(reminderDispatchInterval)
 	defer ticker.Stop()
@@ -160,10 +167,17 @@ func runReminderDispatcher(ctx context.Context, reminders *reminder.Service, log
 			sent, failed, err := reminders.Dispatch(ctx, time.Now())
 			if err != nil {
 				logger.Error("reminder dispatch failed", "error", err)
+			} else if sent > 0 || failed > 0 {
+				logger.Info("reminder dispatch complete", "sent", sent, "failed", failed)
+			}
+
+			digestSent, digestFailed, digestErr := reminders.DispatchDigests(ctx, time.Now())
+			if digestErr != nil {
+				logger.Error("digest dispatch failed", "error", digestErr)
 				continue
 			}
-			if sent > 0 || failed > 0 {
-				logger.Info("reminder dispatch complete", "sent", sent, "failed", failed)
+			if digestSent > 0 || digestFailed > 0 {
+				logger.Info("digest dispatch complete", "sent", digestSent, "failed", digestFailed)
 			}
 		}
 	}
