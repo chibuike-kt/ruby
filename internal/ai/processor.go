@@ -139,15 +139,24 @@ func (p *Processor) Handle(ctx context.Context, msg InboundMessage) (Reply, erro
 	}
 
 	// Voice replies (docs/BRIEF-research-hardening-standard.md Part 5
-	// Tier 1): at minimum for voice-note-originated messages — a trader
-	// who spoke a voice note most likely wants to hear one back, not
-	// switch to reading. Skipped whenever the reply carries
-	// buttons/a list: those need to be seen and tapped regardless, so a
-	// voice-only version alongside them would be redundant, never a
-	// substitute. Best-effort and never blocks the text reply that
-	// already sent above — same reasoning as automatic trader reminders.
+	// Tier 1): additive, never a substitute — the text reply above is
+	// the actual record and always sends exactly as it does today; a
+	// voice-note-originated exchange additionally gets a spoken version
+	// as a second message alongside it. Centralized here, at the one
+	// place every reply passes through regardless of which internal
+	// handler produced it (a slot-fill question, a deterministic
+	// Go-built list, a terminal confirmation — all the same), so a
+	// multi-turn flow that started as voice gets a voice reply for
+	// every turn the trader themselves spoke, and a genuinely
+	// deterministic reply (no Phraser call at all, e.g. LIST_OUTSTANDING_
+	// DEBTS) still qualifies. Skipped only for a reply carrying a real
+	// multi-option decision (more than one button, or a list) — those
+	// need to be read and picked among regardless, so voice adds little;
+	// a lone Cancel button riding alongside an otherwise free-text
+	// question (every slot-fill question has exactly this shape) isn't a
+	// decision to read, so it doesn't disqualify voice.
 	if p.cfg.Speaker != nil && p.cfg.Sender != nil && msg.Type == "audio" &&
-		reply.Text != "" && len(reply.Buttons) == 0 && reply.List == nil {
+		reply.Text != "" && len(reply.Buttons) <= 1 && reply.List == nil {
 		p.sendVoiceReply(ctx, acct.PhoneNumber, reply.Text)
 	}
 
