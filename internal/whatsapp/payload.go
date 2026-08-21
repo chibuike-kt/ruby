@@ -52,11 +52,13 @@ type Profile struct {
 	Name string `json:"name"`
 }
 
-// Message is one entry in value.messages[]. Only Text, Audio, and
+// Message is one entry in value.messages[]. Text, Audio, Image, and
 // Interactive are populated depending on Type — other message types
-// (image, document, location, ...) are accepted and stored with an
-// empty content reference rather than rejected, per spec §37
-// (malformed/unexpected input must not crash the handler).
+// (document, location, ...) are accepted and stored with an empty
+// content reference rather than rejected, per spec §37 (malformed/
+// unexpected input must not crash the handler). Image is docs/BRIEF-
+// research-hardening-standard.md Part 5 Tier 1's photo input — same
+// shape as Audio, since both are just a WhatsApp media id to download.
 type Message struct {
 	From        string       `json:"from"`
 	ID          string       `json:"id"`
@@ -64,6 +66,7 @@ type Message struct {
 	Type        string       `json:"type"`
 	Text        *Text        `json:"text,omitempty"`
 	Audio       *Media       `json:"audio,omitempty"`
+	Image       *Media       `json:"image,omitempty"`
 	Interactive *Interactive `json:"interactive,omitempty"`
 }
 
