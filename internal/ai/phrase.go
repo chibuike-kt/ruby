@@ -30,6 +30,13 @@ const (
 	// trying to word a shared prompt around it.
 	EventDebtConfirmationNeeded    PhraseEvent = "DEBT_CONFIRMATION_NEEDED"
 	EventPaymentConfirmationNeeded PhraseEvent = "PAYMENT_CONFIRMATION_NEEDED"
+	// EventReminderConfirmationNeeded is docs/BRIEF-research-hardening-
+	// standard.md Part 3's "extend confidence-based clarification
+	// everywhere an extraction is genuinely uncertain": CREATE_REMINDER
+	// schedules a real message to a real customer, the same stakes as
+	// CREATE_DEBT/RECORD_PAYMENT, so a low-confidence extraction gets the
+	// same confirm-before-acting gate (see executeCreateReminder).
+	EventReminderConfirmationNeeded PhraseEvent = "REMINDER_CONFIRMATION_NEEDED"
 
 	EventAmbiguousCustomer PhraseEvent = "AMBIGUOUS_CUSTOMER"
 	EventCustomerBalance   PhraseEvent = "CUSTOMER_BALANCE"
@@ -237,6 +244,21 @@ var selfQueryNameText = map[Language]string{
 	LangHausa:   "Sunanka *%s* ne.",
 }
 
+// dataSafetyText is docs/BRIEF-research-hardening-standard.md Part 4's
+// trust-building answer — fixed text, never AI-phrased, so it can never
+// drift into overclaiming a certification Ruby doesn't have. Every
+// sentence here is a fact this codebase actually enforces: no payment
+// credentials are ever collected (CLAUDE.md's own hard scope boundary —
+// Ruby never moves money), and Wema sharing is opt-in and off by
+// default (credit_profile_sharing_enabled, migration 000002).
+var dataSafetyText = map[Language]string{
+	LangEnglish: "Ruby only stores what you tell it — your customers' names, debts, and payments — to keep your own records straight. It never asks for your bank PIN, card details, or passwords, and Ruby doesn't move money on your behalf. Your records are only ever shared with a partner like Wema if you specifically turn that on yourself — never automatically.",
+	LangPidgin:  "Ruby dey only store wetin you tell am — your customers' names, debts, and payments — to keep your own record correct. E no go ever ask for your bank PIN, card details, or password, and Ruby no dey move money for your behalf. Your record no go share with partner like Wema unless na you yourself turn am on — e no dey happen automatic.",
+	LangYoruba:  "Ruby máa ń fi ohun tí o sọ fún un pamọ́ nìkan — orúkọ àwọn oníbàárà rẹ, gbèsè, àti owó tí wọ́n san — kí àkọsílẹ̀ rẹ lè tọ́. Kò ní béèrè fún PIN báńkì rẹ, alaye káàdì, tàbí ọ̀rọ̀ìpamọ́ rẹ rárá, Ruby kì í sì í gbé owó fún ọ. Àkọsílẹ̀ rẹ kì yóò pín pẹ̀lú alábàáṣiṣẹ́ bíi Wema àyàfi tí ìwọ fúnra rẹ bá ṣí i sílẹ̀ — kì í ṣẹlẹ̀ láifọwọ́sowọ́pọ̀.",
+	LangIgbo:    "Ruby na-echekwa naanị ihe ị gwara ya — aha ndị ahịa gị, ụgwọ, na ịkwụ ụgwọ — ka ndekọ gị guzozie. Ọ dịghị ajụ PIN ụlọ akụ gị, nkọwa kaadị, ma ọ bụ paswọọdụ gị mgbe ọ bụla, Ruby anaghị ebugharịkwa ego n'aha gị. Ndekọ gị na-ekekọrịtakwa naanị na onye mmekọ dịka Wema ma ọ bụrụ na ị kpebiri imepe ya n'onwe gị — ọ naghị eme na-akpaghị aka.",
+	LangHausa:   "Ruby na ajiye kawai abin da ka fada masa — sunayen abokan cinikinka, basussuka, da biyan kudi — domin bayananka su tsaya daidai. Ba ya taɓa neman PIN ɗin bankinka, bayanan katin ka, ko kalmar sirri, kuma Ruby ba ya motsa kudi a madadinka. Bayananka ba a taɓa raba su da abokin haɗin gwiwa kamar Wema ba sai ka kanka ka kunna hakan — ba ya faruwa kai tsaye.",
+}
+
 // slotFillCustomerText and slotFillAmountText/slotFillAmountWithNameText
 // are the interactive slot-filling section's own questions
 // (docs/BRIEF-critical-fixes-and-reminders.md) — fixed, not Phraser-
@@ -289,6 +311,39 @@ var slotFillAmountReaskText = map[Language]string{
 	LangYoruba:  "Mo kàn nílò iye owó náà — èló ni?",
 	LangIgbo:    "Naanị achọrọ m ego ole ọ bụ — ego ole ọ bụ?",
 	LangHausa:   "Ina bukatan adadin kudi ne kawai — nawa ne?",
+}
+
+// slotFillCustomerReaskAgainText, slotFillAmountReaskAgainText, and
+// slotFillDateReaskAgainText are docs/BRIEF-research-hardening-
+// standard.md Part 3's phrasing-variation requirement: "repetitive
+// identical fallback messages" is a named failure mode, so a *second*
+// consecutive failed attempt at the same field must never repeat the
+// first reask's exact sentence — narrowed further instead (brief's own
+// example: "How much?" then "Just the amount, like 5000 or 5k, is
+// fine."). handleSlotFillReply alternates between the two reask tables
+// by ReaskCount so no two consecutive re-asks are ever identical.
+var slotFillCustomerReaskAgainText = map[Language]string{
+	LangEnglish: "Just their name is fine, for example Chinedu.",
+	LangPidgin:  "Just their name dey okay, like Chinedu.",
+	LangYoruba:  "Orúkọ wọn nìkan yóò tó, bí Chinedu.",
+	LangIgbo:    "Naanị aha ha ga-ezuru, dịka Chinedu.",
+	LangHausa:   "Sunansu kawai ya isa, misali Chinedu.",
+}
+
+var slotFillAmountReaskAgainText = map[Language]string{
+	LangEnglish: "Just the amount is fine, like 5000 or 5k.",
+	LangPidgin:  "Just the amount dey okay, like 5000 or 5k.",
+	LangYoruba:  "Iye owó náà nìkan yóò tó, bí 5000 tàbí 5k.",
+	LangIgbo:    "Naanị ego ole ọ bụ ga-ezuru, dịka 5000 ma ọ bụ 5k.",
+	LangHausa:   "Adadin kudin kawai ya isa, misali 5000 ko 5k.",
+}
+
+var slotFillDateReaskAgainText = map[Language]string{
+	LangEnglish: "Just the date is fine, like tomorrow or Friday.",
+	LangPidgin:  "Just the date dey okay, like tomorrow or Friday.",
+	LangYoruba:  "Ọjọ́ náà nìkan yóò tó, bí ọ̀la tàbí Friday.",
+	LangIgbo:    "Naanị ụbọchị ga-ezuru, dịka echi ma ọ bụ Friday.",
+	LangHausa:   "Kwanan watan kawai ya isa, misali gobe ko Jumma'a.",
 }
 
 // slotFillDateText/slotFillDateWithNameText and slotFillDateReaskText
