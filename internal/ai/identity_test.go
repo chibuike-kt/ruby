@@ -8,6 +8,8 @@ import (
 	"github.com/chibuike-kt/ruby/internal/ai"
 	"github.com/chibuike-kt/ruby/internal/customer"
 	"github.com/chibuike-kt/ruby/internal/dbtest"
+	"github.com/chibuike-kt/ruby/internal/debt"
+	"github.com/chibuike-kt/ruby/internal/money"
 )
 
 // TestProcessor_IdentityConfirmation_CreateDebt_TriggersPrompt is
@@ -164,6 +166,90 @@ func TestProcessor_IdentityConfirmation_RecordPayment_TriggersPrompt(t *testing.
 	}
 	if got := countRows(t, pool, `SELECT count(*) FROM payments`); got != 0 {
 		t.Fatalf("got %d payments before the same/new question is answered, want 0", got)
+	}
+}
+
+// TestProcessor_IdentityConfirmation_CreateDebt_CorroboratedByHint_SkipsPrompt
+// and TestProcessor_IdentityConfirmation_RecordPayment_CorroboratedByHint_SkipsPrompt
+// are docs/BRIEF-research-hardening-standard.md Part 2's audit: CREATE_DEBT
+// and RECORD_PAYMENT both call Validator.resolve with checkIdentity=true
+// and are gated by the *identical* logic (see resolve's own doc
+// comment) — a recently-referenced customer (spec §8 signal 4)
+// corroborates a bare-name match and skips the same/new question for
+// both intents equally. What looked like an inconsistency in a real
+// transcript (several debt creations against Emmanuel never asked,
+// while a payment did) is fully explained by conversational recency —
+// each debt creation refreshes the hint to Emmanuel, corroborating the
+// next one, while the payment happened to be the first mention of that
+// customer in the current context window — not by any CREATE_DEBT-
+// vs-RECORD_PAYMENT special-casing. These two tests hold both intents
+// to the same standard directly, back to back, so this can never be
+// mistaken for a bug again.
+func TestProcessor_IdentityConfirmation_CreateDebt_CorroboratedByHint_SkipsPrompt(t *testing.T) {
+	pool := dbtest.Open(t)
+	rdb := dbtest.OpenRedis(t)
+	userID := dbtest.CreateUser(t, pool, "+2348060000006")
+	customers := customer.NewService(pool)
+	c, err := customers.Create(context.Background(), userID, "Chinedu", nil, nil)
+	if err != nil {
+		t.Fatalf("seed customer: %v", err)
+	}
+	if err := customer.SetLastCustomerContext(context.Background(), rdb, userID, c.ID, customer.DefaultLastCustomerContextTTL); err != nil {
+		t.Fatalf("seed last customer context: %v", err)
+	}
+
+	extractor := &fakeExtractor{results: []ai.RawIntent{
+		{Intent: ai.IntentCreateDebt, CustomerName: new("Chinedu"), AmountMinor: new(int64(500000)), Confidence: ai.ConfidenceHigh, Language: ai.LangEnglish},
+	}}
+	phraser := &fakePhraser{}
+	sender := &fakeSender{}
+	p := newTestProcessor(pool, rdb, extractor, phraser, sender)
+
+	reply, err := p.Handle(context.Background(), ai.ToInboundMessage(userID, "wamid.identity.6", "text", new("Chinedu took 5k")))
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if len(reply.Buttons) == 2 {
+		t.Fatalf("got the same/new prompt (2 buttons), want it skipped — a corroborating hint resolves CREATE_DEBT identity exactly like it does for RECORD_PAYMENT")
+	}
+	if got := countRows(t, pool, `SELECT count(*) FROM debts WHERE customer_id = $1`, c.ID); got != 1 {
+		t.Fatalf("got %d debts, want 1 — the corroborated match must resolve directly", got)
+	}
+}
+
+func TestProcessor_IdentityConfirmation_RecordPayment_CorroboratedByHint_SkipsPrompt(t *testing.T) {
+	pool := dbtest.Open(t)
+	rdb := dbtest.OpenRedis(t)
+	userID := dbtest.CreateUser(t, pool, "+2348060000007")
+	customers := customer.NewService(pool)
+	debts := debt.NewService(pool)
+	c, err := customers.Create(context.Background(), userID, "Chinedu", nil, nil)
+	if err != nil {
+		t.Fatalf("seed customer: %v", err)
+	}
+	if _, err := debts.Create(context.Background(), userID, c.ID, money.New(7500000, money.NGN), "rice", nil); err != nil {
+		t.Fatalf("seed debt: %v", err)
+	}
+	if err := customer.SetLastCustomerContext(context.Background(), rdb, userID, c.ID, customer.DefaultLastCustomerContextTTL); err != nil {
+		t.Fatalf("seed last customer context: %v", err)
+	}
+
+	extractor := &fakeExtractor{results: []ai.RawIntent{
+		{Intent: ai.IntentRecordPayment, CustomerName: new("Chinedu"), AmountMinor: new(int64(500000)), Confidence: ai.ConfidenceHigh, Language: ai.LangEnglish},
+	}}
+	phraser := &fakePhraser{}
+	sender := &fakeSender{}
+	p := newTestProcessor(pool, rdb, extractor, phraser, sender)
+
+	reply, err := p.Handle(context.Background(), ai.ToInboundMessage(userID, "wamid.identity.7", "text", new("Chinedu paid 5k")))
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if len(reply.Buttons) == 2 {
+		t.Fatalf("got the same/new prompt (2 buttons), want it skipped — a corroborating hint resolves RECORD_PAYMENT identity exactly like it does for CREATE_DEBT")
+	}
+	if got := countRows(t, pool, `SELECT count(*) FROM payments`); got != 1 {
+		t.Fatalf("got %d payments, want 1 — the corroborated match must resolve directly", got)
 	}
 }
 

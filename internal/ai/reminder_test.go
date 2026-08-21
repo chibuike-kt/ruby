@@ -48,7 +48,7 @@ func newTestProcessorWithReminders(pool *pgxpool.Pool, rdb *redis.Client, extrac
 		Customers:   customer.NewService(pool),
 		Debts:       debt.NewService(pool),
 		Payments:    payment.NewService(pool),
-		Reminders:   reminder.NewService(pool, templateSender, "debt_reminder_customer", "debt_reminder_trader"),
+		Reminders:   reminder.NewService(pool, templateSender, "debt_reminder_customer", "debt_reminder_trader", "weekly_digest"),
 	})
 }
 
@@ -322,7 +322,7 @@ func TestProcessor_ReminderDispatch_UsesTemplatedShape(t *testing.T) {
 		t.Fatalf("Handle (phone reply): %v", err)
 	}
 
-	svc := reminder.NewService(pool, templateSender, "debt_reminder_customer", "debt_reminder_trader")
+	svc := reminder.NewService(pool, templateSender, "debt_reminder_customer", "debt_reminder_trader", "weekly_digest")
 	sent, failed, err := svc.Dispatch(context.Background(), time.Now())
 	if err != nil {
 		t.Fatalf("Dispatch: %v", err)

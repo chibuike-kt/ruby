@@ -21,7 +21,7 @@ var allIntents = []string{
 	string(IntentGetPaymentSummary), string(IntentCreateReminder), string(IntentCancelReminder),
 	string(IntentGetCustomerStatement),
 	string(IntentConfirmAction), string(IntentHelp), string(IntentUnsupported),
-	string(IntentSmallTalk), string(IntentSelfQuery),
+	string(IntentSmallTalk), string(IntentSelfQuery), string(IntentDataSafety),
 }
 
 var allLanguages = []string{
@@ -66,6 +66,27 @@ func IntentSchema() map[string]any {
 			},
 		},
 		"required":             []string{"intent", "customer_name", "amount_minor", "description", "due_date_iso", "confidence", "language"},
+		"additionalProperties": false,
+	}
+}
+
+// VisionIntentSchema wraps IntentSchema in a "transactions" array —
+// docs/BRIEF-research-hardening-standard.md Part 5 Tier 1's photo input.
+// Structured Outputs strict mode requires an object at the root (not a
+// bare array), so a photo's however-many transactions come back as
+// {"transactions": [...]}, each element the exact same shape the text
+// extractor already produces — there is no separate, looser schema for
+// vision-derived data.
+func VisionIntentSchema() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"transactions": map[string]any{
+				"type":  "array",
+				"items": IntentSchema(),
+			},
+		},
+		"required":             []string{"transactions"},
 		"additionalProperties": false,
 	}
 }

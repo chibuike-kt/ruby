@@ -196,7 +196,7 @@ func TestProcessor_CancelReminder_CancelsScheduled(t *testing.T) {
 	// Seed scheduled reminders directly against the debt (mirroring
 	// what executeCreateDebt does automatically on a real debt-creation
 	// message — debt.Service.Create alone doesn't schedule anything).
-	reminders := reminder.NewService(pool, templateSender, "debt_reminder_customer", "debt_reminder_trader")
+	reminders := reminder.NewService(pool, templateSender, "debt_reminder_customer", "debt_reminder_trader", "weekly_digest")
 	if _, err := reminders.ScheduleTraderReminders(context.Background(), d.ID, userID, dueDate); err != nil {
 		t.Fatalf("seed reminders: %v", err)
 	}

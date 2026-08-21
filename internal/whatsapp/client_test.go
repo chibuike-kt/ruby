@@ -3,6 +3,7 @@ package whatsapp
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -390,3 +391,123 @@ func TestTruncateTitle_ExactlyAtLimitUnchanged(t *testing.T) {
 		t.Fatalf("got %q, want the 20-char title unchanged", got)
 	}
 }
+
+// TestSendAudioFlow_UploadThenSend_Success is docs/BRIEF-research-
+// hardening-standard.md Part 5 Tier 1's voice replies: the media must be
+// uploaded first (its own id, not the raw bytes, is what a message
+// references), then a second call sends the audio message referencing
+// that id — the outbound mirror of DownloadMedia's upload-free GET.
+func TestSendAudioFlow_UploadThenSend_Success(t *testing.T) {
+	var uploadedType, uploadedAuth string
+	var uploadedBytes []byte
+	var sentPath, sentTo, sentMediaID string
+
+	withTestGraphAPI(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/media"):
+			uploadedAuth = r.Header.Get("Authorization")
+			r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+			//nolint:gosec // G120: request body is already bounded by MaxBytesReader above; this is a local httptest.Server standing in for Meta's own upload endpoint, never internet-facing.
+			if err := r.ParseMultipartForm(1 << 20); err != nil {
+				t.Fatalf("parse multipart form: %v", err)
+			}
+			uploadedType = r.FormValue("type")
+			file, _, err := r.FormFile("file")
+			if err != nil {
+				t.Fatalf("read uploaded file: %v", err)
+			}
+			defer func() { _ = file.Close() }()
+			data, err := io.ReadAll(file)
+			if err != nil {
+				t.Fatalf("read uploaded file bytes: %v", err)
+			}
+			uploadedBytes = data
+
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":"media-id-123"}`))
+		case strings.HasSuffix(r.URL.Path, "/messages"):
+			sentPath = r.URL.Path
+			var payload audioMessageRequest
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatalf("decode request body: %v", err)
+			}
+			sentTo = payload.To
+			sentMediaID = payload.Audio.ID
+
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"messages":[{"id":"wamid.AUDIO123"}]}`))
+		default:
+			t.Fatalf("unexpected request path %q", r.URL.Path)
+		}
+	})
+
+	mediaID, err := uploadMedia(context.Background(), "test-token", "1234567890", []byte("aac-bytes"), "audio/aac")
+	if err != nil {
+		t.Fatalf("uploadMedia: %v", err)
+	}
+	if mediaID != "media-id-123" {
+		t.Fatalf("got media id %q, want media-id-123", mediaID)
+	}
+	if uploadedAuth != "Bearer test-token" {
+		t.Fatalf("got upload Authorization %q, want Bearer test-token", uploadedAuth)
+	}
+	if uploadedType != "audio/aac" {
+		t.Fatalf("got uploaded type %q, want audio/aac", uploadedType)
+	}
+	if string(uploadedBytes) != "aac-bytes" {
+		t.Fatalf("got uploaded bytes %q, want aac-bytes", uploadedBytes)
+	}
+
+	id, err := sendAudio(context.Background(), "test-token", "1234567890", "+2348012345678", mediaID)
+	if err != nil {
+		t.Fatalf("sendAudio: %v", err)
+	}
+	if id != "wamid.AUDIO123" {
+		t.Fatalf("got id %q, want wamid.AUDIO123", id)
+	}
+	if sentPath != "/1234567890/messages" {
+		t.Fatalf("got path %q, want /1234567890/messages", sentPath)
+	}
+	if sentTo != "2348012345678" {
+		t.Fatalf("got to %q, want digits-only 2348012345678 (no leading +)", sentTo)
+	}
+	if sentMediaID != "media-id-123" {
+		t.Fatalf("got sent media id %q, want media-id-123", sentMediaID)
+	}
+}
+
+// TestService_SendAudio_PersistsOutboundMessage confirms the Service
+// wrapper drives the same upload-then-send flow and records the result,
+// mirroring TestService_SendText_PersistsOutboundMessage.
+func TestService_SendAudio_PersistsOutboundMessage(t *testing.T) {
+	withTestGraphAPI(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/media"):
+			_, _ = w.Write([]byte(`{"id":"media-id-456"}`))
+		default:
+			_, _ = w.Write([]byte(`{"messages":[{"id":"wamid.AUDIO456"}]}`))
+		}
+	})
+
+	pool := dbtest.Open(t)
+	rdb := dbtest.OpenRedis(t)
+	dbtest.CreateUser(t, pool, "+2348012345679")
+	svc := NewService(pool, rdb, "test-secret", "test-verify-token", "test-token", "1234567890", slog.Default())
+
+	if err := svc.SendAudio(context.Background(), "+2348012345679", []byte("aac-bytes"), "audio/aac"); err != nil {
+		t.Fatalf("SendAudio: %v", err)
+	}
+
+	var messageType string
+	if err := pool.QueryRow(context.Background(),
+		`SELECT message_type FROM messages WHERE provider_message_id = $1`, "wamid.AUDIO456",
+	).Scan(&messageType); err != nil {
+		t.Fatalf("query outbound message: %v", err)
+	}
+	if messageType != "audio" {
+		t.Fatalf("got message_type %q, want audio", messageType)
+	}
+}
+
+var _ ai.Sender = (*Service)(nil)

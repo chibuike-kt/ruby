@@ -69,3 +69,35 @@ func TestProcessor_SelfQuery_AnswersFromStoredName(t *testing.T) {
 		t.Fatalf("got %d Phraser calls for a self-query, want 0 — it's answered directly from users.name", len(phraser.inputs))
 	}
 }
+
+// TestProcessor_DataSafety_FixedFactualAnswer is docs/BRIEF-research-
+// hardening-standard.md Part 4's trust-building answer: "is my data
+// safe" gets a real, classified answer — fixed text, never the Phraser
+// improvising something that could overclaim a certification Ruby
+// doesn't have.
+func TestProcessor_DataSafety_FixedFactualAnswer(t *testing.T) {
+	pool := dbtest.Open(t)
+	rdb := dbtest.OpenRedis(t)
+	userID := dbtest.CreateUser(t, pool, "+2348140000003")
+
+	extractor := &fakeExtractor{results: []ai.RawIntent{
+		{Intent: ai.IntentDataSafety, Language: ai.LangEnglish},
+	}}
+	phraser := &fakePhraser{}
+	sender := &fakeSender{}
+	p := newTestProcessor(pool, rdb, extractor, phraser, sender)
+
+	reply, err := p.Handle(context.Background(), ai.ToInboundMessage(userID, "wamid.datasafety.1", "text", new("is my data safe with you")))
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if reply.Text == "" {
+		t.Fatal("got an empty reply for a data-safety question")
+	}
+	if strings.Contains(reply.Text, "can't do that yet") || strings.Contains(reply.Text, "Record a debt") {
+		t.Fatalf("got reply %q, want a real answer, not a decline/capability list", reply.Text)
+	}
+	if len(phraser.inputs) != 0 {
+		t.Fatalf("got %d Phraser calls for a data-safety question, want 0 — it's fixed text, never improvised", len(phraser.inputs))
+	}
+}

@@ -257,6 +257,21 @@ func (v *Validator) resolveOrNewCustomer(ctx context.Context, userID int64, name
 // or signal-4 (hint.LastCustomerID corroborating the very match just
 // found) resolution means something already confirmed this is them, so
 // there's nothing left to ask.
+//
+// CREATE_DEBT (via resolveOrNewCustomer) and RECORD_PAYMENT (via
+// resolveExistingCustomer) both call this with checkIdentity=true and
+// hit the exact same corroboration check — there is no per-intent
+// special-casing here (docs/BRIEF-research-hardening-standard.md Part
+// 2's audit, confirmed by TestProcessor_IdentityConfirmation_
+// CreateDebt_CorroboratedByHint_SkipsPrompt and its RecordPayment
+// counterpart in identity_test.go, run back to back against the same
+// hint state). A real transcript where several debt creations against
+// one customer never asked, while a payment did, is fully explained by
+// conversational recency: each debt creation refreshes
+// hint.LastCustomerID to that same customer, corroborating the next
+// mention, while the payment happened to be the first mention of that
+// customer in the current context window. Deliberate, not accidental —
+// documented here so it isn't mistaken for an inconsistency again.
 func (v *Validator) resolve(ctx context.Context, userID int64, ref customer.Ref, hint ContextHint, checkIdentity bool) (customer.Customer, error) {
 	c, err := v.Customers.Resolve(ctx, userID, ref)
 	if err != nil {

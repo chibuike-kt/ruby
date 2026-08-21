@@ -127,7 +127,17 @@ type PendingAction struct {
 	Intent     RawIntent
 	Candidates []PendingCandidateOption
 
-	// OriginalMessage and ReaskCount are used by PendingAwaitingName only.
+	// OriginalMessage is used by PendingAwaitingName only. ReaskCount
+	// started there too, and is now reused by PendingSlotFill and
+	// PendingAwaitingReminderPhone (docs/BRIEF-research-hardening-
+	// standard.md Part 3: "repetitive identical fallback messages" is a
+	// named failure mode) — how many times the *current* question has
+	// been re-asked, so consecutive re-asks can alternate phrasing
+	// instead of repeating the exact same sentence. Reset to 0 whenever
+	// a fresh PendingAction is written for a different question (moving
+	// to the next slot-fill field, a brand new pending flow, etc.) —
+	// every SetPendingAction call that isn't explicitly incrementing it
+	// leaves it at Go's zero value, which is the reset.
 	OriginalMessage *PendingOriginalMessage
 	ReaskCount      int
 
@@ -138,6 +148,18 @@ type PendingAction struct {
 	// than duplicated here, so this pending state can never go stale
 	// relative to the debt record itself.
 	DebtID *int64
+
+	// Queue is the not-yet-processed remainder of a multi-transaction
+	// photo (docs/BRIEF-research-hardening-standard.md Part 5 Tier 1:
+	// photo input properly resolves the earlier-declined multi-
+	// transaction question). A photo showing several transactions never
+	// gets a separate bulk-confirm flow — each one rides through this
+	// same PendingAction machinery, one at a time: whichever transaction
+	// is currently pending (whatever Kind it needed — confirmation or a
+	// missing slot) carries the rest of the photo's transactions here,
+	// and continueQueue resumes them once this one resolves. Empty for
+	// every ordinary (non-photo) pending state.
+	Queue []RawIntent
 }
 
 // DefaultPendingTTL matches the conversational-context window the rest

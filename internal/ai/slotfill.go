@@ -180,14 +180,36 @@ func (p *Processor) slotFillQuestion(raw RawIntent, field SlotField) Reply {
 	}
 }
 
-func (p *Processor) slotFillReask(raw RawIntent, field SlotField) Reply {
+// slotFillReask picks the reask text for field, alternating between two
+// distinct phrasings by reaskCount so a third, fifth, ... consecutive
+// failed attempt never repeats the immediately-previous message
+// verbatim (docs/BRIEF-research-hardening-standard.md Part 3:
+// "repetitive identical fallback messages" is a named failure mode).
+// reaskCount is how many times this exact field has already been
+// re-asked — 0 on the first failure (uses the original reask text), 1+
+// alternates into the narrowed "again" variant, then back, so no two
+// consecutive re-asks for the same field are ever identical.
+func (p *Processor) slotFillReask(raw RawIntent, field SlotField, reaskCount int) Reply {
+	narrowed := reaskCount%2 == 1
 	switch field {
 	case SlotAmount:
-		return Reply{Text: fixedText(slotFillAmountReaskText, raw.Language), Buttons: slotFillCancelButton()}
+		text := fixedText(slotFillAmountReaskText, raw.Language)
+		if narrowed {
+			text = fixedText(slotFillAmountReaskAgainText, raw.Language)
+		}
+		return Reply{Text: text, Buttons: slotFillCancelButton()}
 	case SlotDate:
-		return Reply{Text: fixedText(slotFillDateReaskText, raw.Language), Buttons: slotFillCancelButton()}
+		text := fixedText(slotFillDateReaskText, raw.Language)
+		if narrowed {
+			text = fixedText(slotFillDateReaskAgainText, raw.Language)
+		}
+		return Reply{Text: text, Buttons: slotFillCancelButton()}
 	default: // SlotCustomer
-		return Reply{Text: fixedText(slotFillCustomerReaskText, raw.Language), Buttons: slotFillCancelButton()}
+		text := fixedText(slotFillCustomerReaskText, raw.Language)
+		if narrowed {
+			text = fixedText(slotFillCustomerReaskAgainText, raw.Language)
+		}
+		return Reply{Text: text, Buttons: slotFillCancelButton()}
 	}
 }
 
@@ -207,7 +229,7 @@ func (p *Processor) handleSlotFillButtonReply(ctx context.Context, msg InboundMe
 		missing := missingSlotFields(pending.Intent, hint, true)
 		if len(missing) == 0 {
 			reply, err := p.validateAndExecute(ctx, msg, pending.Intent)
-			return reply, lang, err
+			return p.continueQueue(ctx, msg, reply, lang, err, pending.Queue)
 		}
 		return p.slotFillQuestion(pending.Intent, missing[0]), lang, nil
 	}
@@ -215,7 +237,7 @@ func (p *Processor) handleSlotFillButtonReply(ctx context.Context, msg InboundMe
 	if err := ClearPendingAction(ctx, p.cfg.Redis, msg.UserID); err != nil {
 		p.logf("failed to clear pending action", "error", err)
 	}
-	return textReply(fixedText(cancelledText, lang)), lang, nil
+	return p.continueQueue(ctx, msg, textReply(fixedText(cancelledText, lang)), lang, nil, pending.Queue)
 }
 
 // handleSlotFillReply is the interactive slot-filling section's core
@@ -306,7 +328,15 @@ func (p *Processor) handleSlotFillReply(ctx context.Context, msg InboundMessage,
 		// Edge case #3: doesn't answer, and isn't a real request
 		// either — re-ask, the same "obviously doesn't match what was
 		// asked" pattern as name-capture, generalized to this field.
-		return p.slotFillReask(pending.Intent, currentField), lang, nil
+		// ReaskCount is tracked and persisted so a third, fifth, ...
+		// consecutive failure alternates phrasing instead of repeating
+		// the immediately-previous message (docs/BRIEF-research-
+		// hardening-standard.md Part 3).
+		nextReaskCount := pending.ReaskCount + 1
+		if err := SetPendingAction(ctx, p.cfg.Redis, msg.UserID, PendingAction{Kind: PendingSlotFill, Intent: pending.Intent, ReaskCount: nextReaskCount, Queue: pending.Queue}, DefaultPendingTTL); err != nil {
+			return Reply{}, lang, err
+		}
+		return p.slotFillReask(pending.Intent, currentField, pending.ReaskCount), lang, nil
 	}
 
 	// Edge case #6 (a correction, "actually make that 7k") falls out
@@ -327,7 +357,7 @@ func (p *Processor) handleSlotFillReply(ctx context.Context, msg InboundMessage,
 	if len(stillMissing) > 0 {
 		// Edge case #1: filled one field, still need another — ask for
 		// the next one, never both at once.
-		if err := SetPendingAction(ctx, p.cfg.Redis, msg.UserID, PendingAction{Kind: PendingSlotFill, Intent: updated}, DefaultPendingTTL); err != nil {
+		if err := SetPendingAction(ctx, p.cfg.Redis, msg.UserID, PendingAction{Kind: PendingSlotFill, Intent: updated, Queue: pending.Queue}, DefaultPendingTTL); err != nil {
 			return Reply{}, lang, err
 		}
 		return p.slotFillQuestion(updated, stillMissing[0]), lang, nil
@@ -351,5 +381,5 @@ func (p *Processor) handleSlotFillReply(ctx context.Context, msg InboundMessage,
 			reply.Text += "\n\n" + secondReply.Text
 		}
 	}
-	return reply, lang, nil
+	return p.continueQueue(ctx, msg, reply, lang, nil, pending.Queue)
 }

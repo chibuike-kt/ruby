@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"strings"
 	"time"
@@ -444,4 +445,111 @@ func downloadMedia(ctx context.Context, accessToken, mediaID string) ([]byte, st
 	}
 
 	return data, meta.MimeType, nil
+}
+
+type mediaUploadResponse struct {
+	ID string `json:"id"`
+}
+
+// uploadMedia posts raw bytes to the Cloud API's media upload endpoint
+// (POST /{phone_number_id}/media) and returns the media id an outbound
+// message (sendAudio) can then reference — the mirror of downloadMedia's
+// GET direction, needed for docs/BRIEF-research-hardening-standard.md
+// Part 5 Tier 1's voice replies.
+func uploadMedia(ctx context.Context, accessToken, phoneNumberID string, data []byte, mimeType string) (string, error) {
+	url := fmt.Sprintf("%s/%s/media", graphAPIBaseURL, phoneNumberID)
+
+	var body bytes.Buffer
+	w := multipart.NewWriter(&body)
+	if err := w.WriteField("messaging_product", "whatsapp"); err != nil {
+		return "", err
+	}
+	if err := w.WriteField("type", mimeType); err != nil {
+		return "", err
+	}
+	fw, err := w.CreateFormFile("file", "voice-reply"+extensionFor(mimeType))
+	if err != nil {
+		return "", err
+	}
+	if _, err := fw.Write(data); err != nil {
+		return "", err
+	}
+	if err := w.Close(); err != nil {
+		return "", err
+	}
+
+	bodyBytes := body.Bytes()
+	contentType := w.FormDataContentType()
+	resp, err := doWithRetry(ctx, func() (*http.Request, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyBytes))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Content-Type", contentType)
+		req.Header.Set("Authorization", "Bearer "+accessToken)
+		return req, nil
+	})
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxMediaResponseBytes))
+	if err != nil {
+		return "", err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("whatsapp: media upload failed with status %d", resp.StatusCode)
+	}
+
+	var parsed mediaUploadResponse
+	if err := json.Unmarshal(respBody, &parsed); err != nil {
+		return "", err
+	}
+	if parsed.ID == "" {
+		return "", fmt.Errorf("whatsapp: media upload response had no id")
+	}
+	return parsed.ID, nil
+}
+
+// extensionFor is cosmetic only (the multipart filename) — the Cloud API
+// determines the actual media type from the "type" field, not the
+// filename extension.
+func extensionFor(mimeType string) string {
+	switch mimeType {
+	case "audio/aac":
+		return ".aac"
+	case "audio/mpeg":
+		return ".mp3"
+	case "audio/ogg":
+		return ".ogg"
+	default:
+		return ""
+	}
+}
+
+type audioMessageRequest struct {
+	MessagingProduct string              `json:"messaging_product"`
+	To               string              `json:"to"`
+	Type             string              `json:"type"`
+	Audio            audioMessagePayload `json:"audio"`
+}
+
+type audioMessagePayload struct {
+	ID string `json:"id"`
+}
+
+// sendAudio posts an audio message referencing an already-uploaded media
+// id via the Cloud API.
+func sendAudio(ctx context.Context, accessToken, phoneNumberID, to, mediaID string) (string, error) {
+	reqBody, err := json.Marshal(audioMessageRequest{
+		MessagingProduct: "whatsapp",
+		To:               strings.TrimPrefix(to, "+"),
+		Type:             "audio",
+		Audio:            audioMessagePayload{ID: mediaID},
+	})
+	if err != nil {
+		return "", err
+	}
+	return postMessage(ctx, accessToken, phoneNumberID, reqBody)
 }

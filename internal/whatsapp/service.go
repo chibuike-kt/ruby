@@ -111,6 +111,23 @@ func (s *Service) SendList(ctx context.Context, to, body, buttonLabel string, se
 	return s.recordOutbound(ctx, to, id, "interactive", body)
 }
 
+// SendAudio uploads already-synthesized speech and sends it as an audio
+// message — docs/BRIEF-research-hardening-standard.md Part 5 Tier 1's
+// voice replies. The Cloud API requires media to be uploaded first (its
+// own id, not the raw bytes, is what a message references) — the
+// outbound mirror of DownloadMedia's inbound GET.
+func (s *Service) SendAudio(ctx context.Context, to string, audio []byte, mimeType string) error {
+	mediaID, err := uploadMedia(ctx, s.accessToken, s.phoneNumberID, audio, mimeType)
+	if err != nil {
+		return err
+	}
+	id, err := sendAudio(ctx, s.accessToken, s.phoneNumberID, to, mediaID)
+	if err != nil {
+		return err
+	}
+	return s.recordOutbound(ctx, to, id, "audio", "[voice reply]")
+}
+
 // recordOutbound is shared by every Send* method. The account lookup is
 // best-effort: a failure to attribute the row to a user_id doesn't stop
 // the reply from being recorded.
@@ -289,6 +306,10 @@ func contentReference(msg Message) *string {
 	case "audio":
 		if msg.Audio != nil {
 			return &msg.Audio.ID
+		}
+	case "image":
+		if msg.Image != nil {
+			return &msg.Image.ID
 		}
 	case "interactive":
 		if msg.Interactive == nil {

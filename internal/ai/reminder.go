@@ -49,6 +49,12 @@ var reminderPhoneRequestText = map[Language]string{
 // mirrors onboarding.go's nameReaskText/customerSignalReaskText.
 const reminderPhoneReaskText = "I just need a phone number to send the reminder to — what should I use?"
 
+// reminderPhoneReaskAgainText is docs/BRIEF-research-hardening-
+// standard.md Part 3's phrasing-variation requirement — a second
+// consecutive failed attempt narrows the ask instead of repeating
+// reminderPhoneReaskText's exact sentence.
+const reminderPhoneReaskAgainText = "Just the number is fine, digits only, for example 08012345678."
+
 // reminderScheduledText confirms scheduling — %s is the customer name.
 var reminderScheduledText = map[Language]string{
 	LangEnglish: "Got it — I'll remind *%s* the day before, and again on the due date.",
@@ -61,11 +67,13 @@ var reminderScheduledText = map[Language]string{
 // reminderDeclinedText acknowledges "No thanks" — a brief neutral
 // acknowledgment rather than dead silence after a button tap, matching
 // every other interactive reply in this file (editPromptText,
-// cancelledText).
+// cancelledText). No exclamation mark (docs/BRIEF-research-hardening-
+// standard.md Part 4): this is a routine acknowledgment, not a
+// genuinely warranted moment (a settled debt, a first greeting).
 var reminderDeclinedText = map[Language]string{
-	LangEnglish: "No problem!",
-	LangPidgin:  "No wahala!",
-	LangYoruba:  "Kò sí ìṣòro!",
-	LangIgbo:    "Ọ dịghị nsogbu!",
-	LangHausa:   "Babu matsala!",
+	LangEnglish: "No problem.",
+	LangPidgin:  "No wahala.",
+	LangYoruba:  "Kò sí ìṣòro.",
+	LangIgbo:    "Ọ dịghị nsogbu.",
+	LangHausa:   "Babu matsala.",
 }
