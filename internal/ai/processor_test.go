@@ -75,9 +75,18 @@ type sentMessage struct {
 	list    *ai.ListPayload
 }
 
+// sentAudio records one SendAudio call — kept separate from sentMessage
+// since a voice reply (docs/BRIEF-research-hardening-standard.md Part 5
+// Tier 1) is always sent alongside, never instead of, the text reply.
+type sentAudio struct {
+	audio    []byte
+	mimeType string
+}
+
 type fakeSender struct {
-	mu   sync.Mutex
-	sent []sentMessage
+	mu    sync.Mutex
+	sent  []sentMessage
+	audio []sentAudio
 }
 
 func (f *fakeSender) SendText(_ context.Context, _, body string) error {
@@ -85,6 +94,22 @@ func (f *fakeSender) SendText(_ context.Context, _, body string) error {
 	defer f.mu.Unlock()
 	f.sent = append(f.sent, sentMessage{body: body})
 	return nil
+}
+
+func (f *fakeSender) SendAudio(_ context.Context, _ string, audio []byte, mimeType string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.audio = append(f.audio, sentAudio{audio: audio, mimeType: mimeType})
+	return nil
+}
+
+func (f *fakeSender) lastAudio() sentAudio {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.audio) == 0 {
+		return sentAudio{}
+	}
+	return f.audio[len(f.audio)-1]
 }
 
 func (f *fakeSender) SendButtons(_ context.Context, _, body string, buttons []ai.Button) error {
@@ -663,6 +688,10 @@ func TestPhraseInput_NeverCarriesRawText(t *testing.T) {
 	}
 }
 
+// TestProcessor_UnsupportedMessageType covers a type this codebase
+// genuinely never handles (video) — "image" is Part 5 Tier 1's own photo
+// input now, covered separately in voice_reply_test.go's photo-input
+// tests (image_input_test.go).
 func TestProcessor_UnsupportedMessageType(t *testing.T) {
 	pool := dbtest.Open(t)
 	rdb := dbtest.OpenRedis(t)
@@ -673,7 +702,7 @@ func TestProcessor_UnsupportedMessageType(t *testing.T) {
 	sender := &fakeSender{}
 	p := newTestProcessor(pool, rdb, extractor, phraser, sender)
 
-	reply, err := p.Handle(context.Background(), ai.ToInboundMessage(userID, "wamid.image.1", "image", nil))
+	reply, err := p.Handle(context.Background(), ai.ToInboundMessage(userID, "wamid.video.1", "video", nil))
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
@@ -682,6 +711,31 @@ func TestProcessor_UnsupportedMessageType(t *testing.T) {
 	}
 	if len(extractor.calls) != 0 {
 		t.Fatalf("got %d extractor calls for an unsupported message type, want 0", len(extractor.calls))
+	}
+}
+
+// TestProcessor_Image_VisionNotConfigured_FriendlyFallback confirms an
+// image message never crashes when Vision isn't wired (an older test
+// double, or the feature simply not configured) — same friendly decline
+// any other unsupported message type gets, matching the established
+// Reminders == nil / Speaker == nil pattern.
+func TestProcessor_Image_VisionNotConfigured_FriendlyFallback(t *testing.T) {
+	pool := dbtest.Open(t)
+	rdb := dbtest.OpenRedis(t)
+	userID := dbtest.CreateUser(t, pool, "+2348050000016")
+
+	extractor := &fakeExtractor{} // no scripted results: must not be called
+	p := newTestProcessor(pool, rdb, extractor, &fakePhraser{}, &fakeSender{})
+
+	reply, err := p.Handle(context.Background(), ai.ToInboundMessage(userID, "wamid.image.novision", "image", new("media-id-1")))
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if reply.Text == "" {
+		t.Fatal("got an empty reply with Vision unconfigured, want a friendly fallback")
+	}
+	if len(extractor.calls) != 0 {
+		t.Fatalf("got %d extractor calls with Vision unconfigured, want 0", len(extractor.calls))
 	}
 }
 

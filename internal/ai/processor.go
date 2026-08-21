@@ -68,7 +68,7 @@ func ToInboundMessage(userID int64, providerMessageID, messageType string, conte
 	switch messageType {
 	case "text":
 		msg.Text = contentReference
-	case "audio":
+	case "audio", "image":
 		msg.MediaID = contentReference
 	case "interactive":
 		msg.InteractiveID = contentReference
@@ -77,8 +77,8 @@ func ToInboundMessage(userID int64, providerMessageID, messageType string, conte
 }
 
 // Config wires every collaborator Processor needs. Extractor/Transcriber/
-// Transcoder/Phraser/Sender/Media are interfaces so tests can fake the
-// AI provider and WhatsApp transport entirely.
+// Transcoder/Phraser/Sender/Media/Speaker are interfaces so tests can
+// fake the AI provider and WhatsApp transport entirely.
 type Config struct {
 	Extractor   Extractor
 	Transcriber Transcriber
@@ -86,6 +86,12 @@ type Config struct {
 	Phraser     Phraser
 	Sender      Sender
 	Media       MediaDownloader
+	// Speaker and Vision are optional (nil in any Config wired without
+	// Part 5 Tier 1's voice-reply/photo-input features, e.g. an older
+	// test double) — matches the established Reminders == nil pattern
+	// elsewhere in this file.
+	Speaker Speaker
+	Vision  VisionExtractor
 
 	Pool      *pgxpool.Pool
 	Redis     *redis.Client
@@ -132,7 +138,31 @@ func (p *Processor) Handle(ctx context.Context, msg InboundMessage) (Reply, erro
 		}
 	}
 
+	// Voice replies (docs/BRIEF-research-hardening-standard.md Part 5
+	// Tier 1): at minimum for voice-note-originated messages — a trader
+	// who spoke a voice note most likely wants to hear one back, not
+	// switch to reading. Skipped whenever the reply carries
+	// buttons/a list: those need to be seen and tapped regardless, so a
+	// voice-only version alongside them would be redundant, never a
+	// substitute. Best-effort and never blocks the text reply that
+	// already sent above — same reasoning as automatic trader reminders.
+	if p.cfg.Speaker != nil && p.cfg.Sender != nil && msg.Type == "audio" &&
+		reply.Text != "" && len(reply.Buttons) == 0 && reply.List == nil {
+		p.sendVoiceReply(ctx, acct.PhoneNumber, reply.Text)
+	}
+
 	return reply, procErr
+}
+
+func (p *Processor) sendVoiceReply(ctx context.Context, to, text string) {
+	audio, mimeType, err := p.cfg.Speaker.Speak(ctx, text)
+	if err != nil {
+		p.logf("voice reply synthesis failed", "error", err)
+		return
+	}
+	if err := p.cfg.Sender.SendAudio(ctx, to, audio, mimeType); err != nil {
+		p.logf("voice reply send failed", "error", err)
+	}
 }
 
 // send picks SendList/SendButtons/SendText based on what reply actually
@@ -170,6 +200,16 @@ func (p *Processor) process(ctx context.Context, msg InboundMessage, acct accoun
 		return p.handleInteractive(ctx, msg, pending, hasPending)
 	}
 
+	// Photo input (docs/BRIEF-research-hardening-standard.md Part 5 Tier
+	// 1): treated as a fresh, deliberate action, exactly like the
+	// interactive dispatch just above — it never falls through into
+	// whatever text-shaped pending flow happens to be open (a slot-fill
+	// question, a same/new prompt, ...), none of which know what to do
+	// with an image anyway.
+	if msg.Type == "image" {
+		return p.handleImage(ctx, msg, acct)
+	}
+
 	// Interactive slot-filling edge case #4 (docs/BRIEF-critical-fixes-
 	// and-reminders.md): "never mind"/"cancel"/equivalents must cleanly
 	// exit *any* pending state, checked once here rather than per-flow.
@@ -180,7 +220,7 @@ func (p *Processor) process(ctx context.Context, msg InboundMessage, acct accoun
 				p.logf("failed to clear pending action", "error", clearErr)
 			}
 			lang := stickyOrPendingLanguage(pending)
-			return textReply(fixedText(cancelledText, lang)), lang, nil
+			return p.continueQueue(ctx, msg, textReply(fixedText(cancelledText, lang)), lang, nil, pending.Queue)
 		}
 	}
 
@@ -267,7 +307,6 @@ func (p *Processor) process(ctx context.Context, msg InboundMessage, acct accoun
 	// only a message with enough content to genuinely signal a change
 	// does.
 	raw.Language = p.resolveStickyLanguage(ctx, msg.UserID, text, raw.Language)
-	lang := raw.Language
 
 	if hasPending && pending.Kind == PendingConfirm {
 		if raw.Intent == IntentConfirmAction {
@@ -275,7 +314,7 @@ func (p *Processor) process(ctx context.Context, msg InboundMessage, acct accoun
 				p.logf("failed to clear pending action", "error", clearErr)
 			}
 			reply, err := p.executeConfirmed(ctx, msg, pending.Intent)
-			return reply, pending.Intent.Language, err
+			return p.continueQueue(ctx, msg, reply, pending.Intent.Language, err, pending.Queue)
 		}
 		// The schema has no negative-confirmation signal (plan decision
 		// #3): a reply that isn't CONFIRM_ACTION means the trader moved
@@ -285,6 +324,19 @@ func (p *Processor) process(ctx context.Context, msg InboundMessage, acct accoun
 			p.logf("failed to clear pending action", "error", clearErr)
 		}
 	}
+
+	return p.processOneRawIntent(ctx, msg, acct, raw)
+}
+
+// processOneRawIntent runs raw through the exact same slot-fill/
+// confirmation/execution pipeline every trader intent — however it
+// arrived (typed, spoken, or read from a photo) — ultimately goes
+// through. Shared by the ordinary text/audio path above and photo
+// input's per-transaction loop (processExtractedIntents), so there is no
+// separate, photo-specific decision logic to drift out of sync with the
+// one text messages already use.
+func (p *Processor) processOneRawIntent(ctx context.Context, msg InboundMessage, acct account.Account, raw RawIntent) (Reply, Language, error) {
+	lang := raw.Language
 
 	switch raw.Intent {
 	case IntentConfirmAction:
@@ -298,6 +350,11 @@ func (p *Processor) process(ctx context.Context, msg InboundMessage, acct accoun
 	case IntentSelfQuery:
 		// #3b: answered straight from users.name, never a decline.
 		return textReply(fmt.Sprintf(fixedText(selfQueryNameText, lang), acct.Name)), lang, nil
+	case IntentDataSafety:
+		// docs/BRIEF-research-hardening-standard.md Part 4: fixed text,
+		// never AI-phrased — a real answer to "is my data safe," not a
+		// landing-page FAQ improvised fresh every time.
+		return textReply(fixedText(dataSafetyText, lang)), lang, nil
 	}
 
 	// Interactive slot-filling: CREATE_DEBT/RECORD_PAYMENT missing a
@@ -395,11 +452,14 @@ func (p *Processor) handleConfirmationButtonReply(ctx context.Context, msg Inbou
 			p.logf("failed to clear pending action", "error", err)
 		}
 		reply, err := p.executeConfirmed(ctx, msg, pending.Intent)
-		return reply, lang, err
+		return p.continueQueue(ctx, msg, reply, lang, err, pending.Queue)
 	case buttonEdit:
 		// "Edit can just prompt the trader to resend the message
 		// correctly rather than building inline editing" — real scope,
-		// explicitly skipped (docs/BRIEF-interactive-messages.md).
+		// explicitly skipped (docs/BRIEF-interactive-messages.md). A
+		// photo queue riding along doesn't carry over here either — Edit
+		// is itself already an explicit "start over" affordance, and
+		// there's no clean way to "resend" a photo transaction inline.
 		if err := ClearPendingAction(ctx, p.cfg.Redis, msg.UserID); err != nil {
 			p.logf("failed to clear pending action", "error", err)
 		}
@@ -408,7 +468,7 @@ func (p *Processor) handleConfirmationButtonReply(ctx context.Context, msg Inbou
 		if err := ClearPendingAction(ctx, p.cfg.Redis, msg.UserID); err != nil {
 			p.logf("failed to clear pending action", "error", err)
 		}
-		return textReply(fixedText(cancelledText, lang)), lang, nil
+		return p.continueQueue(ctx, msg, textReply(fixedText(cancelledText, lang)), lang, nil, pending.Queue)
 	default:
 		// Unrecognized id while a confirmation is pending — re-ask
 		// rather than silently dropping it.
@@ -571,12 +631,12 @@ func (p *Processor) handleReminderOptInButtonReply(ctx context.Context, msg Inbo
 
 	switch id {
 	case buttonReminderYes:
-		return p.handleReminderOptInYes(ctx, msg, *pending.DebtID, lang)
+		return p.handleReminderOptInYes(ctx, msg, *pending.DebtID, lang, pending.Queue)
 	case buttonReminderNo:
 		if err := ClearPendingAction(ctx, p.cfg.Redis, msg.UserID); err != nil {
 			p.logf("failed to clear pending action", "error", err)
 		}
-		return textReply(fixedText(reminderDeclinedText, lang)), lang, nil
+		return p.continueQueue(ctx, msg, textReply(fixedText(reminderDeclinedText, lang)), lang, nil, pending.Queue)
 	default:
 		// Unrecognized id — re-ask rather than silently dropping it,
 		// same pattern as handleConfirmationButtonReply's default case.
@@ -619,7 +679,7 @@ func (p *Processor) handleReminderOptInTextReply(ctx context.Context, msg Inboun
 // handleReminderOptInYes is decisions.md's phone-on-file branch
 // (docs/BRIEF-fixes-and-reminders.md #4): schedule immediately if the
 // customer already has a phone number, otherwise ask for one first.
-func (p *Processor) handleReminderOptInYes(ctx context.Context, msg InboundMessage, debtID int64, lang Language) (Reply, Language, error) {
+func (p *Processor) handleReminderOptInYes(ctx context.Context, msg InboundMessage, debtID int64, lang Language, queue []RawIntent) (Reply, Language, error) {
 	d, c, err := p.debtAndCustomer(ctx, msg.UserID, debtID)
 	if err != nil {
 		return Reply{}, lang, err
@@ -630,13 +690,14 @@ func (p *Processor) handleReminderOptInYes(ctx context.Context, msg InboundMessa
 			Kind:   PendingAwaitingReminderPhone,
 			Intent: RawIntent{Language: lang},
 			DebtID: &debtID,
+			Queue:  queue,
 		}, DefaultPendingTTL); err != nil {
 			return Reply{}, lang, err
 		}
 		return textReply(fixedText(reminderPhoneRequestText, lang)), lang, nil
 	}
 
-	return p.scheduleReminder(ctx, msg, d, c, lang)
+	return p.scheduleReminder(ctx, msg, d, c, lang, queue)
 }
 
 // handleReminderPhoneReply captures the phone number decisions.md's
@@ -653,8 +714,31 @@ func (p *Processor) handleReminderPhoneReply(ctx context.Context, msg InboundMes
 		return Reply{}, lang, err
 	}
 	text = strings.TrimSpace(text)
-	if !looksLikePhone(text) {
-		return textReply(reminderPhoneReaskText), lang, nil
+	valid := looksLikePhone(text)
+	if !valid {
+		// docs/BRIEF-research-hardening-standard.md Part 2: the
+		// reask-then-success contradiction reported earlier was
+		// investigated exhaustively and never reproduced — this logs
+		// the shape of the input, the validation result, and which
+		// reply got queued, right at the decision point, so a repeat is
+		// diagnosable in one look instead of requiring another full
+		// investigation from scratch. Never the raw digits themselves —
+		// spec §36 forbids logging a customer's phone number — only
+		// enough shape (length, digit count) to tell what kind of input
+		// tripped the check.
+		p.infof("reminder phone validation", "user_id", msg.UserID, "debt_id", *pending.DebtID, "input_len", len(text), "input_digits", digitCount(text), "looks_like_phone", false, "reply_queued", "reask")
+		// docs/BRIEF-research-hardening-standard.md Part 3: alternate
+		// phrasing on a second consecutive failure — never repeat the
+		// exact same reask sentence back to back.
+		nextReaskCount := pending.ReaskCount + 1
+		if err := SetPendingAction(ctx, p.cfg.Redis, msg.UserID, PendingAction{Kind: PendingAwaitingReminderPhone, Intent: pending.Intent, DebtID: pending.DebtID, ReaskCount: nextReaskCount, Queue: pending.Queue}, DefaultPendingTTL); err != nil {
+			return Reply{}, lang, err
+		}
+		reaskText := reminderPhoneReaskText
+		if pending.ReaskCount%2 == 1 {
+			reaskText = reminderPhoneReaskAgainText
+		}
+		return textReply(reaskText), lang, nil
 	}
 
 	d, c, err := p.debtAndCustomer(ctx, msg.UserID, *pending.DebtID)
@@ -666,13 +750,26 @@ func (p *Processor) handleReminderPhoneReply(ctx context.Context, msg InboundMes
 	}
 	c.PhoneNumber = &text
 
-	return p.scheduleReminder(ctx, msg, d, c, lang)
+	p.infof("reminder phone validation", "user_id", msg.UserID, "debt_id", *pending.DebtID, "input_len", len(text), "input_digits", digitCount(text), "looks_like_phone", true, "reply_queued", "scheduled")
+	return p.scheduleReminder(ctx, msg, d, c, lang, pending.Queue)
+}
+
+// digitCount is a privacy-safe diagnostic helper (see
+// handleReminderPhoneReply) — a count, never the digits themselves.
+func digitCount(text string) int {
+	n := 0
+	for _, r := range text {
+		if r >= '0' && r <= '9' {
+			n++
+		}
+	}
+	return n
 }
 
 // scheduleReminder is the shared tail of both the phone-already-on-file
 // and just-captured-it paths: schedule via internal/reminder, clear the
 // pending state, confirm.
-func (p *Processor) scheduleReminder(ctx context.Context, msg InboundMessage, d debt.Debt, c customer.Customer, lang Language) (Reply, Language, error) {
+func (p *Processor) scheduleReminder(ctx context.Context, msg InboundMessage, d debt.Debt, c customer.Customer, lang Language, queue []RawIntent) (Reply, Language, error) {
 	if p.cfg.Reminders != nil && d.DueDate != nil {
 		if _, err := p.cfg.Reminders.OptIn(ctx, d.ID, c.ID, *d.DueDate); err != nil {
 			return Reply{}, lang, err
@@ -681,7 +778,7 @@ func (p *Processor) scheduleReminder(ctx context.Context, msg InboundMessage, d 
 	if err := ClearPendingAction(ctx, p.cfg.Redis, msg.UserID); err != nil {
 		p.logf("failed to clear pending action", "error", err)
 	}
-	return textReply(fmt.Sprintf(fixedText(reminderScheduledText, lang), c.Name)), lang, nil
+	return p.continueQueue(ctx, msg, textReply(fmt.Sprintf(fixedText(reminderScheduledText, lang), c.Name)), lang, nil, queue)
 }
 
 // debtAndCustomer re-fetches the debt and its customer for a reminder
@@ -1150,12 +1247,15 @@ func (p *Processor) beginConfirmation(ctx context.Context, msg InboundMessage, r
 	// docs/BRIEF-final-demo-fixes.md #2: which event this is must come
 	// from raw.Intent, the one thing Processor itself already knows for
 	// certain — never left for the Phraser to guess from a generic
-	// shared event name. beginConfirmation is only ever reached from
-	// executeCreateDebt/executeRecordPayment's own low-confidence gate,
-	// so raw.Intent is always one of these two.
+	// shared event name. beginConfirmation is reached from
+	// executeCreateDebt/executeRecordPayment/executeCreateReminder's own
+	// low-confidence gates, so raw.Intent is always one of these three.
 	event := EventDebtConfirmationNeeded
-	if raw.Intent == IntentRecordPayment {
+	switch raw.Intent {
+	case IntentRecordPayment:
 		event = EventPaymentConfirmationNeeded
+	case IntentCreateReminder:
+		event = EventReminderConfirmationNeeded
 	}
 	// raw.AmountMinor is already *int64 — passed through as-is rather
 	// than defaulted to 0 when nil, so a genuinely-missing amount never
@@ -1257,6 +1357,15 @@ func (p *Processor) executeGetCustomerStatement(ctx context.Context, msg Inbound
 // the customer opt-in flow: Tier 2a's own example is "remind me," not
 // "remind him."
 func (p *Processor) executeCreateReminder(ctx context.Context, msg InboundMessage, raw RawIntent, a CreateReminderAction) (Reply, error) {
+	// docs/BRIEF-research-hardening-standard.md Part 3: CREATE_REMINDER
+	// schedules a real message to a real customer — the same stakes as
+	// CREATE_DEBT/RECORD_PAYMENT, so a low-confidence extraction gets the
+	// same confirm-before-acting gate those two already have, rather than
+	// scheduling on an uncertain guess.
+	if raw.Confidence == ConfidenceLow {
+		return p.beginConfirmation(ctx, msg, raw)
+	}
+
 	c, err := customer.GetByID(ctx, p.cfg.Pool, msg.UserID, a.CustomerID)
 	if err != nil {
 		return Reply{}, err
@@ -1450,4 +1559,15 @@ func (p *Processor) errf(msg string, args ...any) {
 		return
 	}
 	p.cfg.Logger.Error(msg, args...)
+}
+
+// infof is logf's Info-level counterpart, for routine, expected
+// decision points worth recording for diagnosability without implying
+// anything went wrong — see handleReminderPhoneReply's structured
+// validation logging (docs/BRIEF-research-hardening-standard.md Part 2).
+func (p *Processor) infof(msg string, args ...any) {
+	if p.cfg.Logger == nil {
+		return
+	}
+	p.cfg.Logger.Info(msg, args...)
 }
