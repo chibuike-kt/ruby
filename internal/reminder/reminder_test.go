@@ -35,7 +35,7 @@ func TestScheduleCustomer_CreatesDayBeforeAndDueDateReminders(t *testing.T) {
 	dueDate := time.Date(2026, 9, 10, 0, 0, 0, 0, time.UTC)
 	_, debtID, customerID := setupDebt(t, pool, "+2348070000001", "+2348030000001", dueDate)
 
-	rows, err := reminder.ScheduleCustomer(context.Background(), pool, debtID, customerID, dueDate, "debt_reminder_customer")
+	rows, err := reminder.ScheduleCustomer(context.Background(), pool, debtID, customerID, dueDate, "debt_reminder_customer", time.Now())
 	if err != nil {
 		t.Fatalf("ScheduleCustomer: %v", err)
 	}
@@ -79,7 +79,7 @@ func TestScheduleTrader_CreatesDayBeforeAndDueDateReminders(t *testing.T) {
 	dueDate := time.Date(2026, 9, 10, 0, 0, 0, 0, time.UTC)
 	userID, debtID, _ := setupDebt(t, pool, "+2348070000011", "+2348030000011", dueDate)
 
-	rows, err := reminder.ScheduleTrader(context.Background(), pool, debtID, userID, dueDate, "debt_reminder_trader")
+	rows, err := reminder.ScheduleTrader(context.Background(), pool, debtID, userID, dueDate, "debt_reminder_trader", time.Now())
 	if err != nil {
 		t.Fatalf("ScheduleTrader: %v", err)
 	}
@@ -96,19 +96,66 @@ func TestScheduleTrader_CreatesDayBeforeAndDueDateReminders(t *testing.T) {
 	}
 }
 
+// TestScheduleTrader_DueToday_SkipsDayBeforeReminder is docs/BRIEF-
+// research-hardening-standard.md Part 5 live-testing finding #4: a debt
+// whose due date lands on the current date must not get a day-before
+// reminder too — that reminder's own scheduled time (yesterday) is
+// already overdue at the moment it would be created, so it fires in the
+// same dispatch pass as the due-today one, which reads as spam rather
+// than two genuinely distinct nudges.
+func TestScheduleTrader_DueToday_SkipsDayBeforeReminder(t *testing.T) {
+	pool := dbtest.Open(t)
+	now := time.Date(2026, 9, 10, 14, 30, 0, 0, time.UTC)
+	dueDate := time.Date(2026, 9, 10, 0, 0, 0, 0, time.UTC)
+	userID, debtID, _ := setupDebt(t, pool, "+2348070000013", "+2348030000013", dueDate)
+
+	rows, err := reminder.ScheduleTrader(context.Background(), pool, debtID, userID, dueDate, "debt_reminder_trader", now)
+	if err != nil {
+		t.Fatalf("ScheduleTrader: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("got %d reminders, want 1 — the day-before slot must be skipped for a debt due today", len(rows))
+	}
+	if !rows[0].ScheduledAt.UTC().Equal(dueDate) {
+		t.Fatalf("got scheduled_at %v, want the due-date reminder (%v), not a day-before one", rows[0].ScheduledAt, dueDate)
+	}
+}
+
+// TestScheduleTrader_DueTomorrow_StillGetsBothReminders confirms the
+// guard is scoped to "due today or earlier" specifically — a debt due
+// tomorrow still gets its normal day-before/due-date pair.
+func TestScheduleTrader_DueTomorrow_StillGetsBothReminders(t *testing.T) {
+	pool := dbtest.Open(t)
+	now := time.Date(2026, 9, 9, 14, 30, 0, 0, time.UTC)
+	dueDate := time.Date(2026, 9, 10, 0, 0, 0, 0, time.UTC)
+	userID, debtID, _ := setupDebt(t, pool, "+2348070000014", "+2348030000014", dueDate)
+
+	rows, err := reminder.ScheduleTrader(context.Background(), pool, debtID, userID, dueDate, "debt_reminder_trader", now)
+	if err != nil {
+		t.Fatalf("ScheduleTrader: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("got %d reminders, want 2 — a debt due tomorrow still gets both", len(rows))
+	}
+}
+
 func TestDueForDispatch_OnlyReturnsScheduledAtOrBeforeNow(t *testing.T) {
 	pool := dbtest.Open(t)
 	traderPhone, customerPhone := "+2348070000002", "+2348030000002"
 
 	pastDue := time.Now().Add(-48 * time.Hour)
 	userID, debtID, customerID := setupDebt(t, pool, traderPhone, customerPhone, pastDue)
-	if _, err := reminder.ScheduleCustomer(context.Background(), pool, debtID, customerID, pastDue, "debt_reminder_customer"); err != nil {
+	// Scheduled a day before pastDue itself (realistic: the debt was
+	// created well before its due date, which has since passed) — so
+	// both reminders exist here, not collapsed by the same-day guard
+	// this test isn't about.
+	if _, err := reminder.ScheduleCustomer(context.Background(), pool, debtID, customerID, pastDue, "debt_reminder_customer", pastDue.Add(-24*time.Hour)); err != nil {
 		t.Fatalf("ScheduleCustomer (past): %v", err)
 	}
 
 	futureDue := time.Now().Add(30 * 24 * time.Hour)
 	_, futureDebtID, futureCustomerID := setupDebt(t, pool, "+2348070000012", "+2348030000012", futureDue)
-	if _, err := reminder.ScheduleCustomer(context.Background(), pool, futureDebtID, futureCustomerID, futureDue, "debt_reminder_customer"); err != nil {
+	if _, err := reminder.ScheduleCustomer(context.Background(), pool, futureDebtID, futureCustomerID, futureDue, "debt_reminder_customer", time.Now()); err != nil {
 		t.Fatalf("ScheduleCustomer (future): %v", err)
 	}
 
@@ -149,7 +196,7 @@ func TestMarkSent_And_MarkFailed(t *testing.T) {
 	dueDate := time.Now().Add(-time.Hour)
 	_, debtID, customerID := setupDebt(t, pool, "+2348070000003", "+2348030000003", dueDate)
 
-	rows, err := reminder.ScheduleCustomer(context.Background(), pool, debtID, customerID, dueDate, "debt_reminder_customer")
+	rows, err := reminder.ScheduleCustomer(context.Background(), pool, debtID, customerID, dueDate, "debt_reminder_customer", dueDate.Add(-24*time.Hour))
 	if err != nil {
 		t.Fatalf("ScheduleCustomer: %v", err)
 	}
@@ -180,7 +227,7 @@ func TestMarkProcessing_ClaimsOnce(t *testing.T) {
 	pool := dbtest.Open(t)
 	dueDate := time.Now().Add(-time.Hour)
 	_, debtID, customerID := setupDebt(t, pool, "+2348070000006", "+2348030000006", dueDate)
-	rows, err := reminder.ScheduleCustomer(context.Background(), pool, debtID, customerID, dueDate, "debt_reminder_customer")
+	rows, err := reminder.ScheduleCustomer(context.Background(), pool, debtID, customerID, dueDate, "debt_reminder_customer", dueDate.Add(-24*time.Hour))
 	if err != nil {
 		t.Fatalf("ScheduleCustomer: %v", err)
 	}
@@ -228,7 +275,7 @@ func TestDispatch_SendsCustomerReminderViaTemplate(t *testing.T) {
 	customerPhone := "+2348030000004"
 	dueDate := time.Now().Add(-time.Hour)
 	_, debtID, customerID := setupDebt(t, pool, "+2348070000004", customerPhone, dueDate)
-	if _, err := reminder.ScheduleCustomer(context.Background(), pool, debtID, customerID, dueDate, "debt_reminder_customer"); err != nil {
+	if _, err := reminder.ScheduleCustomer(context.Background(), pool, debtID, customerID, dueDate, "debt_reminder_customer", dueDate.Add(-24*time.Hour)); err != nil {
 		t.Fatalf("ScheduleCustomer: %v", err)
 	}
 
@@ -275,7 +322,7 @@ func TestDispatch_SendsTraderReminderViaTemplate(t *testing.T) {
 	traderPhone := "+2348070000005"
 	dueDate := time.Now().Add(-time.Hour)
 	userID, debtID, _ := setupDebt(t, pool, traderPhone, "+2348030000005", dueDate)
-	if _, err := reminder.ScheduleTrader(context.Background(), pool, debtID, userID, dueDate, "debt_reminder_trader"); err != nil {
+	if _, err := reminder.ScheduleTrader(context.Background(), pool, debtID, userID, dueDate, "debt_reminder_trader", dueDate.Add(-24*time.Hour)); err != nil {
 		t.Fatalf("ScheduleTrader: %v", err)
 	}
 
@@ -313,7 +360,7 @@ func TestDispatch_SettledDebt_Cancelled(t *testing.T) {
 	pool := dbtest.Open(t)
 	dueDate := time.Now().Add(-time.Hour)
 	userID, debtID, customerID := setupDebt(t, pool, "+2348070000007", "+2348030000007", dueDate)
-	if _, err := reminder.ScheduleCustomer(context.Background(), pool, debtID, customerID, dueDate, "debt_reminder_customer"); err != nil {
+	if _, err := reminder.ScheduleCustomer(context.Background(), pool, debtID, customerID, dueDate, "debt_reminder_customer", dueDate.Add(-24*time.Hour)); err != nil {
 		t.Fatalf("ScheduleCustomer: %v", err)
 	}
 
@@ -350,7 +397,7 @@ func TestDispatch_SendFailure_MarksFailedNotSilently(t *testing.T) {
 	pool := dbtest.Open(t)
 	dueDate := time.Now().Add(-time.Hour)
 	_, debtID, customerID := setupDebt(t, pool, "+2348070000008", "+2348030000008", dueDate)
-	if _, err := reminder.ScheduleCustomer(context.Background(), pool, debtID, customerID, dueDate, "debt_reminder_customer"); err != nil {
+	if _, err := reminder.ScheduleCustomer(context.Background(), pool, debtID, customerID, dueDate, "debt_reminder_customer", dueDate.Add(-24*time.Hour)); err != nil {
 		t.Fatalf("ScheduleCustomer: %v", err)
 	}
 

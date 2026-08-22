@@ -1,11 +1,31 @@
 package customer
 
+// HintKind names what kind of value CandidateHint.Hint actually is — an
+// alias is a person-identifier a trader chose specifically to tell
+// same-named customers apart, while a description is whatever item they
+// last bought. The two read as plausible sentences either way ("Chinedu
+// — Atlas" vs "Chinedu — two cartons of noodles"), so a candidate list
+// mixing an alias for one match and a description for another must
+// label which is which — a bare hint string with no kind attached is
+// exactly how "Atlas" gets misread as a purchased item instead of a
+// person's nickname (docs/BRIEF-research-hardening-standard.md Part 5
+// live-testing finding #2).
+type HintKind string
+
+const (
+	HintAlias       HintKind = "alias"
+	HintPhone       HintKind = "phone"
+	HintDescription HintKind = "description"
+	HintCreatedDate HintKind = "created_date"
+)
+
 // CandidateHint pairs an ambiguous match with the text Ruby should show
 // a trader to help them pick between candidates (spec §11) — display
 // enrichment only, never used to auto-select a candidate.
 type CandidateHint struct {
 	Customer Customer
 	Hint     string
+	Kind     HintKind
 }
 
 // hintDateFormat matches decisions.md #8's own example ("added 2 Aug
@@ -50,25 +70,26 @@ func (e *AmbiguousError) Hints(descriptions map[int64]string) []CandidateHint {
 
 	hints := make([]CandidateHint, len(e.Candidates))
 	for i, c := range e.Candidates {
-		hints[i] = CandidateHint{Customer: c, Hint: hintFor(c, descriptions[c.ID], distinguishing)}
+		value, kind := hintFor(c, descriptions[c.ID], distinguishing)
+		hints[i] = CandidateHint{Customer: c, Hint: value, Kind: kind}
 	}
 	return hints
 }
 
-func hintFor(c Customer, description string, descriptionDistinguishes bool) string {
+func hintFor(c Customer, description string, descriptionDistinguishes bool) (string, HintKind) {
 	if alias := trimmed(c.Alias); alias != "" {
-		return alias
+		return alias, HintAlias
 	}
 	if phone := trimmed(c.PhoneNumber); phone != "" {
-		return phone
+		return phone, HintPhone
 	}
 	if descriptionDistinguishes {
 		// description itself may be "" for this specific candidate —
 		// that's still a real contrast against a sibling that has one,
 		// not a tie, so it's used as-is rather than falling further.
-		return description
+		return description, HintDescription
 	}
-	return "added " + c.CreatedAt.Format(hintDateFormat)
+	return "added " + c.CreatedAt.Format(hintDateFormat), HintCreatedDate
 }
 
 func distinctValues(candidates []Customer, descriptions map[int64]string) map[string]bool {

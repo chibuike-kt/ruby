@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/chibuike-kt/ruby/internal/account"
 )
@@ -18,10 +19,13 @@ var noTransactionsInPhotoText = map[Language]string{
 	LangHausa:   "Ban iya ganin wata mu'amala a hoton ba — za ka iya gaya mini abin da ya faru maimakon?",
 }
 
-// photoQueueDroppedText tells the trader honestly when a rarer mid-photo
-// snag (an ambiguous customer match, a name needing same/new
-// confirmation, ...) means the rest of that photo's transactions won't
-// resume automatically — never silently dropped without a word.
+// photoQueueDroppedText is the fallback for a pending kind
+// pendingCanQueue doesn't (yet) recognize — every kind photo processing
+// can actually land in is covered as of docs/BRIEF-research-hardening-
+// standard.md Part 5's live-testing fix #1, so this should never
+// trigger in practice. Kept as the honest fail-safe if a future pending
+// kind is added and continueQueue isn't wired into it: tell the trader
+// plainly rather than silently dropping their transactions.
 var photoQueueDroppedText = map[Language]string{
 	LangEnglish: "I'll need you to send me the other %d transactions from that photo again once we sort this one out.",
 	LangPidgin:  "I go need make you send the other %d transactions from dat photo again once we don sort dis one.",
@@ -61,20 +65,33 @@ func (p *Processor) handleImage(ctx context.Context, msg InboundMessage, acct ac
 }
 
 // pendingCanQueue reports whether kind's own resolution points know to
-// call continueQueue — the common "needs the trader's input" cases a
-// photo transaction hits (a low-confidence guess, a missing field, the
-// automatic reminder opt-in question a due-dated debt already asks
-// unconditionally). The rarer paths (identity confirmation,
-// disambiguation, a new customer's phone/alias) don't carry a queue
-// forward; processExtractedIntents tells the trader honestly instead of
-// leaving it silently stuck.
+// call continueQueue. Every pending kind a photo transaction can land in
+// is covered — repeated names are exactly the common case a real ledger
+// photo hits (docs/BRIEF-research-hardening-standard.md Part 5 Tier 1
+// live-testing finding #1): disambiguation and identity-confirmation are
+// not rarer edge cases to leave unresumed, they're the normal shape of
+// "which Chinedu" questions a multi-transaction photo triggers
+// constantly.
 func pendingCanQueue(kind PendingKind) bool {
 	switch kind {
-	case PendingConfirm, PendingSlotFill, PendingReminderOptIn, PendingAwaitingReminderPhone:
+	case PendingConfirm, PendingSlotFill, PendingReminderOptIn, PendingAwaitingReminderPhone,
+		PendingIdentityConfirm, PendingAwaitingCustomerSignal, PendingDisambiguateCustomer:
 		return true
 	default:
 		return false
 	}
+}
+
+// pendingTTL mirrors whatever TTL kind's own begin* function already
+// uses — a queue attaching to an existing pending state (see
+// processExtractedIntents) re-sets it and must not silently downgrade a
+// deliberately longer TTL (PendingReminderOptIn's, see beginReminderOptIn)
+// back to the standard conversational window.
+func pendingTTL(kind PendingKind) time.Duration {
+	if kind == PendingReminderOptIn {
+		return ReminderOptInPendingTTL
+	}
+	return DefaultPendingTTL
 }
 
 // processExtractedIntents drives one or more freshly-extracted intents
@@ -116,7 +133,12 @@ func (p *Processor) processExtractedIntents(ctx context.Context, msg InboundMess
 		if len(rest) > 0 {
 			if pendingCanQueue(pendingNow.Kind) {
 				pendingNow.Queue = rest
-				if setErr := SetPendingAction(ctx, p.cfg.Redis, msg.UserID, pendingNow, DefaultPendingTTL); setErr != nil {
+				// pendingTTL, not the blanket DefaultPendingTTL: a queue
+				// attaching to PendingReminderOptIn must not downgrade
+				// its own deliberately longer TTL back to the standard
+				// conversational window (docs/BRIEF-research-hardening-
+				// standard.md Part 5 live-testing finding #4).
+				if setErr := SetPendingAction(ctx, p.cfg.Redis, msg.UserID, pendingNow, pendingTTL(pendingNow.Kind)); setErr != nil {
 					return Reply{}, lang, setErr
 				}
 			} else {

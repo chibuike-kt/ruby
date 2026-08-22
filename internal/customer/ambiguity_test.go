@@ -102,8 +102,14 @@ func TestAmbiguousError_Hints_AliasTakesPriority(t *testing.T) {
 	if hints[0].Hint != "mechanic" {
 		t.Fatalf("got hint %q, want the alias to take priority over the description", hints[0].Hint)
 	}
+	if hints[0].Kind != customer.HintAlias {
+		t.Fatalf("got kind %v, want HintAlias — docs/BRIEF-research-hardening-standard.md Part 5 live-testing finding #2: an alias and a description must never render as the same unlabeled kind of hint", hints[0].Kind)
+	}
 	if hints[1].Hint != "1 bag of cement" {
 		t.Fatalf("got hint %q, want the description for the candidate with no alias", hints[1].Hint)
+	}
+	if hints[1].Kind != customer.HintDescription {
+		t.Fatalf("got kind %v, want HintDescription", hints[1].Kind)
 	}
 }
 
@@ -125,6 +131,9 @@ func TestAmbiguousError_Hints_PhoneUsedWhenNoAlias(t *testing.T) {
 
 	if hints[0].Hint != phone {
 		t.Fatalf("got hint %q, want the phone number to take priority over the description", hints[0].Hint)
+	}
+	if hints[0].Kind != customer.HintPhone {
+		t.Fatalf("got kind %v, want HintPhone", hints[0].Kind)
 	}
 }
 

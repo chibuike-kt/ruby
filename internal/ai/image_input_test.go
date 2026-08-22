@@ -2,12 +2,14 @@ package ai_test
 
 import (
 	"context"
+	"strconv"
 	"testing"
 
 	"github.com/chibuike-kt/ruby/internal/ai"
 	"github.com/chibuike-kt/ruby/internal/customer"
 	"github.com/chibuike-kt/ruby/internal/dbtest"
 	"github.com/chibuike-kt/ruby/internal/debt"
+	"github.com/chibuike-kt/ruby/internal/money"
 	"github.com/chibuike-kt/ruby/internal/payment"
 )
 
@@ -284,12 +286,15 @@ func TestProcessor_Image_NoTransactionsFound_FriendlyDecline(t *testing.T) {
 	}
 }
 
-// TestProcessor_Image_IdentityConfirmationMidQueue_QueueDroppedWithNotice
-// covers the deliberate, narrower scope: identity confirmation doesn't
-// resume a photo queue automatically (unlike confirmation/slot-fill/
-// reminder opt-in) — the trader is told honestly, never left silently
-// stuck wondering where the rest of the photo went.
-func TestProcessor_Image_IdentityConfirmationMidQueue_QueueDroppedWithNotice(t *testing.T) {
+// TestProcessor_Image_IdentityConfirmationMidQueue_ResumesRest is the
+// live-testing regression from docs/BRIEF-research-hardening-standard.md
+// Part 5 finding #1: a photo with several transactions hit identity
+// disambiguation on the *first* one and the rest were silently dropped
+// — repeated customer names are the normal case a real ledger photo
+// hits constantly, not a rare edge case, so identity confirmation must
+// resume the queue exactly like confirmation/slot-fill/reminder opt-in
+// already do.
+func TestProcessor_Image_IdentityConfirmationMidQueue_ResumesRest(t *testing.T) {
 	pool := dbtest.Open(t)
 	rdb := dbtest.OpenRedis(t)
 	userID := dbtest.CreateUser(t, pool, "+2348210000007")
@@ -326,15 +331,93 @@ func TestProcessor_Image_IdentityConfirmationMidQueue_QueueDroppedWithNotice(t *
 	if err != nil || !ok || pending.Kind != ai.PendingIdentityConfirm {
 		t.Fatalf("got pending (ok=%v kind=%v err=%v), want PendingIdentityConfirm", ok, pending.Kind, err)
 	}
-	if len(pending.Queue) != 0 {
-		t.Fatalf("got queue length %d, want 0 — identity confirmation deliberately doesn't carry the rest of the photo queue forward", len(pending.Queue))
+	if len(pending.Queue) != 1 {
+		t.Fatalf("got queue length %d, want 1 (Uche still waiting) — identity confirmation must carry the rest of the photo queue forward", len(pending.Queue))
 	}
 
 	sameID := "identity:same"
 	if _, err := p.Handle(context.Background(), ai.ToInboundMessage(userID, "wamid.photo.7b", "interactive", &sameID)); err != nil {
 		t.Fatalf("Handle (same): %v", err)
 	}
-	if got := countRows(t, pool, `SELECT count(*) FROM debts WHERE user_id = $1`, userID); got != 1 {
-		t.Fatalf("got %d debts, want 1 (only Ngozi's) — Uche's was deliberately not auto-resumed", got)
+	if got := countRows(t, pool, `SELECT count(*) FROM debts WHERE user_id = $1`, userID); got != 2 {
+		t.Fatalf("got %d debts, want 2 — Uche's transaction must have resumed automatically after Ngozi's identity confirmation resolved", got)
+	}
+	if _, ok, _ := ai.GetPendingAction(context.Background(), rdb, userID); ok {
+		t.Fatal("got a pending action left over after the whole photo queue resolved, want none")
+	}
+}
+
+// TestProcessor_Image_DisambiguationMidQueue_ResumesRest is the exact
+// reproduction the live-testing report asked for: multiple queued
+// transactions, the first hits disambiguation (which-of-several-
+// matches, not same/new), resolving it must continue the rest, not
+// drop them.
+func TestProcessor_Image_DisambiguationMidQueue_ResumesRest(t *testing.T) {
+	pool := dbtest.Open(t)
+	rdb := dbtest.OpenRedis(t)
+	userID := dbtest.CreateUser(t, pool, "+2348210000008")
+	customers := customer.NewService(pool)
+	debts := debt.NewService(pool)
+	c1, err := customers.Create(context.Background(), userID, "Chinedu", new("+2348030000021"), nil)
+	if err != nil {
+		t.Fatalf("seed customer 1: %v", err)
+	}
+	c2, err := customers.Create(context.Background(), userID, "Chinedu", new("+2348030000022"), nil)
+	if err != nil {
+		t.Fatalf("seed customer 2: %v", err)
+	}
+	if _, err := debts.Create(context.Background(), userID, c1.ID, money.New(5000000, money.NGN), "rice", nil); err != nil {
+		t.Fatalf("seed debt 1: %v", err)
+	}
+	if _, err := debts.Create(context.Background(), userID, c2.ID, money.New(5000000, money.NGN), "rice", nil); err != nil {
+		t.Fatalf("seed debt 2: %v", err)
+	}
+
+	vision := &fakeVision{txns: []ai.RawIntent{
+		{Intent: ai.IntentRecordPayment, CustomerName: new("Chinedu"), AmountMinor: new(int64(500000)), Confidence: ai.ConfidenceHigh, Language: ai.LangEnglish},
+		{Intent: ai.IntentCreateDebt, CustomerName: new("Uche"), AmountMinor: new(int64(1000000)), Confidence: ai.ConfidenceHigh, Language: ai.LangEnglish},
+		{Intent: ai.IntentCreateDebt, CustomerName: new("Amaka"), AmountMinor: new(int64(2000000)), Confidence: ai.ConfidenceHigh, Language: ai.LangEnglish},
+	}}
+	p := ai.NewProcessor(ai.Config{
+		Extractor: &fakeExtractor{},
+		Phraser:   &fakePhraser{},
+		Sender:    &fakeSender{},
+		Media:     fakeMedia{data: []byte("photo-bytes")},
+		Vision:    vision,
+		Pool:      pool,
+		Redis:     rdb,
+		Customers: customers,
+		Debts:     debts,
+		Payments:  payment.NewService(pool),
+	})
+
+	if _, err := p.Handle(context.Background(), ai.ToInboundMessage(userID, "wamid.photo.8", "image", new("media-id-1"))); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	pending, ok, err := ai.GetPendingAction(context.Background(), rdb, userID)
+	if err != nil || !ok || pending.Kind != ai.PendingDisambiguateCustomer {
+		t.Fatalf("got pending (ok=%v kind=%v err=%v), want PendingDisambiguateCustomer for the two Chinedus", ok, pending.Kind, err)
+	}
+	if len(pending.Queue) != 2 {
+		t.Fatalf("got queue length %d, want 2 (Uche and Amaka still waiting)", len(pending.Queue))
+	}
+	if got := countRows(t, pool, `SELECT count(*) FROM payments`); got != 0 {
+		t.Fatalf("got %d payments before disambiguation resolves, want 0", got)
+	}
+
+	firstCandidateID := pending.Candidates[0].CustomerID
+	answerID := strconv.FormatInt(firstCandidateID, 10)
+	if _, err := p.Handle(context.Background(), ai.ToInboundMessage(userID, "wamid.photo.8b", "interactive", &answerID)); err != nil {
+		t.Fatalf("Handle (disambiguation answer): %v", err)
+	}
+
+	if got := countRows(t, pool, `SELECT count(*) FROM payments`); got != 1 {
+		t.Fatalf("got %d payments, want 1 (Chinedu's, once disambiguated)", got)
+	}
+	if got := countRows(t, pool, `SELECT count(*) FROM debts WHERE user_id = $1`, userID); got != 4 {
+		t.Fatalf("got %d debts, want 4 (the 2 seeded plus Uche's and Amaka's) — Uche's and Amaka's must have resumed automatically, not been dropped", got)
+	}
+	if _, ok, _ := ai.GetPendingAction(context.Background(), rdb, userID); ok {
+		t.Fatal("got a pending action left over after the whole photo queue resolved, want none")
 	}
 }

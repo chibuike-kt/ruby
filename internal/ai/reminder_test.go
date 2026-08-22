@@ -327,13 +327,18 @@ func TestProcessor_ReminderDispatch_UsesTemplatedShape(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Dispatch: %v", err)
 	}
-	// 2 customer reminders (opt-in) + 2 automatic trader reminders,
-	// both due (the debt's due date is already in the past).
-	if sent != 4 || failed != 0 {
-		t.Fatalf("got sent=%d failed=%d, want sent=4 failed=0", sent, failed)
+	// 1 customer reminder (opt-in) + 1 automatic trader reminder — not 2
+	// each: the debt's due date was already in the past at scheduling
+	// time, so the day-before slot for both is correctly skipped (docs/
+	// BRIEF-research-hardening-standard.md Part 5 live-testing finding
+	// #4 — a day-before reminder that's already overdue the moment it's
+	// created would otherwise fire in the same dispatch pass as the
+	// due-date one, which reads as spam, not two distinct nudges).
+	if sent != 2 || failed != 0 {
+		t.Fatalf("got sent=%d failed=%d, want sent=2 failed=0", sent, failed)
 	}
-	if len(templateSender.calls) != 4 {
-		t.Fatalf("got %d SendTemplate calls, want 4", len(templateSender.calls))
+	if len(templateSender.calls) != 2 {
+		t.Fatalf("got %d SendTemplate calls, want 2", len(templateSender.calls))
 	}
 	var customerCalls, traderCalls int
 	for _, call := range templateSender.calls {
@@ -355,8 +360,8 @@ func TestProcessor_ReminderDispatch_UsesTemplatedShape(t *testing.T) {
 			t.Fatalf("got unexpected template %q", call.templateName)
 		}
 	}
-	if customerCalls != 2 || traderCalls != 2 {
-		t.Fatalf("got customerCalls=%d traderCalls=%d, want 2 and 2", customerCalls, traderCalls)
+	if customerCalls != 1 || traderCalls != 1 {
+		t.Fatalf("got customerCalls=%d traderCalls=%d, want 1 and 1", customerCalls, traderCalls)
 	}
 }
 
