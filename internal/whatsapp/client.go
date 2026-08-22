@@ -8,6 +8,7 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
+	"net/textproto"
 	"strings"
 	"time"
 
@@ -396,6 +397,7 @@ type mediaMetaResponse struct {
 func downloadMedia(ctx context.Context, accessToken, mediaID string) ([]byte, string, error) {
 	metaURL := fmt.Sprintf("%s/%s", graphAPIBaseURL, mediaID)
 	resp, err := doWithRetry(ctx, func() (*http.Request, error) {
+		//nolint:gosec // G704: mediaID is appended as a URL path segment under the fixed graphAPIBaseURL host, never re-parsed as its own scheme/host — it can't redirect this request to a different origin, so this isn't an SSRF vector regardless of mediaID's contents.
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, metaURL, nil)
 		if err != nil {
 			return nil, err
@@ -456,6 +458,17 @@ type mediaUploadResponse struct {
 // message (sendAudio) can then reference — the mirror of downloadMedia's
 // GET direction, needed for docs/BRIEF-research-hardening-standard.md
 // Part 5 Tier 1's voice replies.
+// createFormFileWithType is multipart.Writer.CreateFormFile with an
+// explicit Content-Type on the file part, instead of CreateFormFile's
+// own hardcoded "application/octet-stream" — see uploadMedia's own
+// comment on why that mismatch matters here.
+func createFormFileWithType(w *multipart.Writer, fieldname, filename, contentType string) (io.Writer, error) {
+	h := make(textproto.MIMEHeader)
+	h.Set("Content-Disposition", fmt.Sprintf(`form-data; name="%s"; filename="%s"`, fieldname, filename))
+	h.Set("Content-Type", contentType)
+	return w.CreatePart(h)
+}
+
 func uploadMedia(ctx context.Context, accessToken, phoneNumberID string, data []byte, mimeType string) (string, error) {
 	url := fmt.Sprintf("%s/%s/media", graphAPIBaseURL, phoneNumberID)
 
@@ -467,7 +480,14 @@ func uploadMedia(ctx context.Context, accessToken, phoneNumberID string, data []
 	if err := w.WriteField("type", mimeType); err != nil {
 		return "", err
 	}
-	fw, err := w.CreateFormFile("file", "voice-reply"+extensionFor(mimeType))
+	// multipart.Writer.CreateFormFile always sets the file part's own
+	// Content-Type to "application/octet-stream", regardless of what
+	// mimeType actually is — a real, specifically-named cause of Meta's
+	// media upload 400/error 131053 ("parameter type does not match
+	// file MIME type"): the declared "type" field above and the file
+	// part's own header must agree with each other and with the actual
+	// bytes, so this writes the part header directly instead.
+	fw, err := createFormFileWithType(w, "file", "voice-reply"+extensionFor(mimeType), mimeType)
 	if err != nil {
 		return "", err
 	}
@@ -481,6 +501,7 @@ func uploadMedia(ctx context.Context, accessToken, phoneNumberID string, data []
 	bodyBytes := body.Bytes()
 	contentType := w.FormDataContentType()
 	resp, err := doWithRetry(ctx, func() (*http.Request, error) {
+		//nolint:gosec // G704: url is built from the fixed graphAPIBaseURL host plus phoneNumberID as a path segment — never attacker-controlled input that could redirect this request elsewhere.
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyBytes))
 		if err != nil {
 			return nil, err
@@ -513,10 +534,13 @@ func uploadMedia(ctx context.Context, accessToken, phoneNumberID string, data []
 }
 
 // extensionFor is cosmetic only (the multipart filename) — the Cloud API
-// determines the actual media type from the "type" field, not the
-// filename extension.
+// determines the actual media type from the "type" field and the file
+// part's own Content-Type header (see createFormFileWithType), not the
+// filename extension. mimeType may carry parameters ("audio/ogg;
+// codecs=opus"), so this matches on the base type, not an exact string.
 func extensionFor(mimeType string) string {
-	switch mimeType {
+	base, _, _ := strings.Cut(mimeType, ";")
+	switch strings.TrimSpace(base) {
 	case "audio/aac":
 		return ".aac"
 	case "audio/mpeg":
