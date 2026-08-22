@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+
+	"github.com/chibuike-kt/ruby/internal/customer"
 )
 
 // matchCandidate deterministically matches a trader's disambiguation
@@ -176,14 +178,63 @@ func numberedTitle(index int, name string) string {
 	return fmt.Sprintf("%d. %s", index+1, name)
 }
 
-// candidateDisplay builds the numbered "1. Chinedu (2 cartons of
-// noodles)" lines used both in the phrased prompt text and reused
-// verbatim on every re-ask, so a mistyped/unmatched reply sees exactly
-// the same numbering as the original prompt.
-func candidateDisplay(candidates []PendingCandidateOption) []string {
+// hintAliasLabelText, hintPhoneLabelText, and hintDescriptionLabelText
+// label what kind of hint is being shown — docs/BRIEF-research-
+// hardening-standard.md Part 5 live-testing finding #2: two candidates
+// sharing an unlabeled hint format ("Chinedu — Atlas" vs "Chinedu — two
+// cartons of noodles") reads as if "Atlas" were a purchased item, not a
+// person-identifier, even though the underlying data was correct.
+// HintCreatedDate needs no label of its own — hintFor's own "added <date>"
+// phrasing is already self-explanatory prose, not a bare value.
+var hintAliasLabelText = map[Language]string{
+	LangEnglish: "alias: %s",
+	LangPidgin:  "wetin dem dey call am: %s",
+	LangYoruba:  "orúkọ àpèjúwe: %s",
+	LangIgbo:    "aha ọzọ: %s",
+	LangHausa:   "sunan laƙabi: %s",
+}
+
+var hintPhoneLabelText = map[Language]string{
+	LangEnglish: "phone: %s",
+	LangPidgin:  "phone: %s",
+	LangYoruba:  "nọ́mbà fóònù: %s",
+	LangIgbo:    "nọmba ekwentị: %s",
+	LangHausa:   "lambar waya: %s",
+}
+
+var hintDescriptionLabelText = map[Language]string{
+	LangEnglish: "last item: %s",
+	LangPidgin:  "di last thing wey dem buy: %s",
+	LangYoruba:  "ọjà tí ó kẹ́yìn: %s",
+	LangIgbo:    "ihe ikpeazụ: %s",
+	LangHausa:   "abu na ƙarshe: %s",
+}
+
+// labeledHint wraps a raw hint value with what kind of hint it is,
+// except HintCreatedDate (already self-explanatory) and an unset Kind
+// (an older/test-double PendingCandidateOption with no kind recorded)
+// — both render the bare value, exactly as before this fix.
+func labeledHint(kind customer.HintKind, hint string, lang Language) string {
+	switch kind {
+	case customer.HintAlias:
+		return fmt.Sprintf(fixedText(hintAliasLabelText, lang), hint)
+	case customer.HintPhone:
+		return fmt.Sprintf(fixedText(hintPhoneLabelText, lang), hint)
+	case customer.HintDescription:
+		return fmt.Sprintf(fixedText(hintDescriptionLabelText, lang), hint)
+	default:
+		return hint
+	}
+}
+
+// candidateDisplay builds the numbered "1. Chinedu (alias: Atlas)"
+// lines used both in the phrased prompt text and reused verbatim on
+// every re-ask, so a mistyped/unmatched reply sees exactly the same
+// numbering as the original prompt.
+func candidateDisplay(candidates []PendingCandidateOption, lang Language) []string {
 	items := make([]string, len(candidates))
 	for i, c := range candidates {
-		items[i] = fmt.Sprintf("%d. %s (%s)", i+1, c.Name, c.Hint)
+		items[i] = fmt.Sprintf("%d. %s (%s)", i+1, c.Name, labeledHint(c.HintKind, c.Hint, lang))
 	}
 	return items
 }

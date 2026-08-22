@@ -163,15 +163,29 @@ func (p *Processor) Handle(ctx context.Context, msg InboundMessage) (Reply, erro
 	return reply, procErr
 }
 
+// sendVoiceReply's two external calls (the real OpenAI TTS request and
+// the real WhatsApp audio-send) each get their own Error-level, stage-
+// tagged log line — docs/BRIEF-research-hardening-standard.md Part 5
+// live-testing finding #3: voice replies weren't arriving live despite
+// two fixes that both passed their own (mocked) test suites, and a
+// mocked test can't catch a real integration failure. Warn-level,
+// generic best-effort logging (the pattern used elsewhere for a
+// non-critical background action, e.g. automatic reminder scheduling)
+// isn't enough here — this needs to be loud and specific enough that
+// the actual failing stage and reason show up in a log search without
+// another blind attempt. Never logs the phone number (spec §36) or the
+// reply text itself, only enough shape to diagnose.
 func (p *Processor) sendVoiceReply(ctx context.Context, to, text string) {
 	audio, mimeType, err := p.cfg.Speaker.Speak(ctx, text)
 	if err != nil {
-		p.logf("voice reply synthesis failed", "error", err)
+		p.errf("voice reply failed", "stage", "synthesize", "text_len", len(text), "error", err)
 		return
 	}
 	if err := p.cfg.Sender.SendAudio(ctx, to, audio, mimeType); err != nil {
-		p.logf("voice reply send failed", "error", err)
+		p.errf("voice reply failed", "stage", "send", "audio_bytes", len(audio), "mime_type", mimeType, "error", err)
+		return
 	}
+	p.infof("voice reply sent", "audio_bytes", len(audio), "mime_type", mimeType)
 }
 
 // send picks SendList/SendButtons/SendText based on what reply actually
@@ -444,11 +458,11 @@ func (p *Processor) handleDisambiguationButtonReply(ctx context.Context, msg Inb
 
 	resolvedID := match.CustomerID
 	reply, err := p.validateAndExecuteWithHint(ctx, msg, pending.Intent, ContextHint{ResolvedCustomerID: &resolvedID})
-	return reply, lang, err
+	return p.continueQueue(ctx, msg, reply, lang, err, pending.Queue)
 }
 
 func (p *Processor) reaskDisambiguation(ctx context.Context, pending PendingAction, lang Language) (Reply, Language, error) {
-	text, err := p.phrase(ctx, PhraseInput{Event: EventAmbiguousCustomer, Language: lang, Items: candidateDisplay(pending.Candidates)})
+	text, err := p.phrase(ctx, PhraseInput{Event: EventAmbiguousCustomer, Language: lang, Items: candidateDisplay(pending.Candidates, lang)})
 	return disambiguationReplyFor(text, pending.Candidates), lang, err
 }
 
@@ -521,9 +535,9 @@ func (p *Processor) handleIdentityConfirmationButtonReply(ctx context.Context, m
 		}
 		resolvedID := candidate.CustomerID
 		reply, err := p.validateAndExecuteWithHint(ctx, msg, pending.Intent, ContextHint{ResolvedCustomerID: &resolvedID})
-		return reply, lang, err
+		return p.continueQueue(ctx, msg, reply, lang, err, pending.Queue)
 	case buttonIdentityNew:
-		reply, err := p.beginCustomerSignalRequest(ctx, msg, pending, candidate.Name)
+		reply, err := p.beginCustomerSignalRequest(ctx, msg, pending, candidate.Name, pending.Queue)
 		return reply, lang, err
 	default:
 		// Unrecognized id while an identity confirmation is pending —
@@ -565,11 +579,12 @@ func (p *Processor) handleIdentityConfirmationTextReply(ctx context.Context, msg
 // same-named record needs a phone number or alias first. The pending
 // intent carries forward unchanged — it's replayed once the signal is
 // captured (handleCustomerSignalReply).
-func (p *Processor) beginCustomerSignalRequest(ctx context.Context, msg InboundMessage, pending PendingAction, existingName string) (Reply, error) {
+func (p *Processor) beginCustomerSignalRequest(ctx context.Context, msg InboundMessage, pending PendingAction, existingName string, queue []RawIntent) (Reply, error) {
 	lang := pending.Intent.Language
 	if err := SetPendingAction(ctx, p.cfg.Redis, msg.UserID, PendingAction{
 		Kind:   PendingAwaitingCustomerSignal,
 		Intent: pending.Intent,
+		Queue:  queue,
 	}, DefaultPendingTTL); err != nil {
 		return Reply{}, err
 	}
@@ -615,7 +630,7 @@ func (p *Processor) handleCustomerSignalReply(ctx context.Context, msg InboundMe
 
 	resolvedID := c.ID
 	reply, err := p.validateAndExecuteWithHint(ctx, msg, pending.Intent, ContextHint{ResolvedCustomerID: &resolvedID})
-	return reply, lang, err
+	return p.continueQueue(ctx, msg, reply, lang, err, pending.Queue)
 }
 
 // beginReminderOptIn parks the just-created debt pending a yes/no
@@ -629,7 +644,7 @@ func (p *Processor) beginReminderOptIn(ctx context.Context, userID, debtID int64
 		Kind:   PendingReminderOptIn,
 		Intent: RawIntent{Language: lang},
 		DebtID: &debtID,
-	}, DefaultPendingTTL)
+	}, ReminderOptInPendingTTL)
 }
 
 func (p *Processor) handleReminderOptInButtonReply(ctx context.Context, msg InboundMessage, pending PendingAction, id string) (Reply, Language, error) {
@@ -653,7 +668,7 @@ func (p *Processor) handleReminderOptInButtonReply(ctx context.Context, msg Inbo
 		if err != nil {
 			return Reply{}, lang, err
 		}
-		return Reply{Text: reminderOptInSuffix(lang, c.Name), Buttons: reminderOptInButtons()}, lang, nil
+		return Reply{Text: reminderOptInSuffix(lang, customerDisplayName(c.Name, c.Alias)), Buttons: reminderOptInButtons()}, lang, nil
 	}
 }
 
@@ -681,7 +696,7 @@ func (p *Processor) handleReminderOptInTextReply(ctx context.Context, msg Inboun
 		if err != nil {
 			return Reply{}, lang, err
 		}
-		return Reply{Text: reminderOptInSuffix(lang, c.Name), Buttons: reminderOptInButtons()}, lang, nil
+		return Reply{Text: reminderOptInSuffix(lang, customerDisplayName(c.Name, c.Alias)), Buttons: reminderOptInButtons()}, lang, nil
 	}
 }
 
@@ -787,7 +802,7 @@ func (p *Processor) scheduleReminder(ctx context.Context, msg InboundMessage, d 
 	if err := ClearPendingAction(ctx, p.cfg.Redis, msg.UserID); err != nil {
 		p.logf("failed to clear pending action", "error", err)
 	}
-	return p.continueQueue(ctx, msg, textReply(fmt.Sprintf(fixedText(reminderScheduledText, lang), c.Name)), lang, nil, queue)
+	return p.continueQueue(ctx, msg, textReply(fmt.Sprintf(fixedText(reminderScheduledText, lang), customerDisplayName(c.Name, c.Alias))), lang, nil, queue)
 }
 
 // debtAndCustomer re-fetches the debt and its customer for a reminder
@@ -886,7 +901,7 @@ func (p *Processor) handleDisambiguationReply(ctx context.Context, msg InboundMe
 
 	resolvedID := match.CustomerID
 	reply, err := p.validateAndExecuteWithHint(ctx, msg, pending.Intent, ContextHint{ResolvedCustomerID: &resolvedID})
-	return reply, lang, err
+	return p.continueQueue(ctx, msg, reply, lang, err, pending.Queue)
 }
 
 func (p *Processor) validateAndExecute(ctx context.Context, msg InboundMessage, raw RawIntent) (Reply, error) {
@@ -964,7 +979,7 @@ func (p *Processor) beginDisambiguation(ctx context.Context, msg InboundMessage,
 		if h.Customer.PhoneNumber != nil {
 			phone = *h.Customer.PhoneNumber
 		}
-		candidates[i] = PendingCandidateOption{CustomerID: h.Customer.ID, Name: h.Customer.Name, Phone: phone, Hint: h.Hint}
+		candidates[i] = PendingCandidateOption{CustomerID: h.Customer.ID, Name: h.Customer.Name, Phone: phone, Hint: h.Hint, HintKind: h.Kind}
 	}
 
 	if err := SetPendingAction(ctx, p.cfg.Redis, msg.UserID, PendingAction{
@@ -975,7 +990,7 @@ func (p *Processor) beginDisambiguation(ctx context.Context, msg InboundMessage,
 		return Reply{}, err
 	}
 
-	text, err := p.phrase(ctx, PhraseInput{Event: EventAmbiguousCustomer, Language: raw.Language, Items: candidateDisplay(candidates)})
+	text, err := p.phrase(ctx, PhraseInput{Event: EventAmbiguousCustomer, Language: raw.Language, Items: candidateDisplay(candidates, raw.Language)})
 	if err != nil {
 		return Reply{}, err
 	}
@@ -1129,23 +1144,45 @@ func (p *Processor) executeCreateDebt(ctx context.Context, msg InboundMessage, r
 // resolveOrCreateCustomer takes a db.Querier rather than always using
 // p.cfg.Pool so a caller already inside a transaction (executeCreateDebt,
 // docs/BRIEF-critical-fixes-and-reminders.md #1b) can pass its own tx —
-// both *pgxpool.Pool and pgx.Tx satisfy db.Querier.
+// both *pgxpool.Pool and pgx.Tx satisfy db.Querier. The returned name is
+// already the alias-annotated display form (customerDisplayName) —
+// docs/BRIEF-research-hardening-standard.md Part 5 live-testing finding
+// #2: a customer's alias must be echoed back at the moment it matters
+// (here, a debt confirming who it's actually for), not left unconfirmed.
 func (p *Processor) resolveOrCreateCustomer(ctx context.Context, q db.Querier, userID int64, ref CustomerRef) (int64, string, error) {
 	if ref.ExistingID != nil {
 		c, err := customer.GetByID(ctx, q, userID, *ref.ExistingID)
 		if err != nil {
 			return 0, "", err
 		}
-		return c.ID, c.Name, nil
+		return c.ID, customerDisplayName(c.Name, c.Alias), nil
 	}
 	if ref.NewName != nil {
 		c, err := customer.CreateChecked(ctx, q, userID, *ref.NewName, nil, nil)
 		if err != nil {
 			return 0, "", err
 		}
-		return c.ID, c.Name, nil
+		return c.ID, customerDisplayName(c.Name, c.Alias), nil
 	}
 	return 0, "", errors.New("ai: customer reference has neither an existing id nor a new name")
+}
+
+// customerDisplayName appends a customer's alias in parentheses when one
+// is on file ("Chinedu (Atlas)") — a bare name alone leaves the trader
+// with no confirmation the alias they set actually saved, and no way to
+// tell, from the confirmation text alone, which same-named customer this
+// was. No label is needed here the way disambiguation's candidateDisplay
+// needs one: with only one hint shown for one already-identified person,
+// there's nothing else it could be confused with.
+func customerDisplayName(name string, alias *string) string {
+	if alias == nil {
+		return name
+	}
+	trimmedAlias := strings.TrimSpace(*alias)
+	if trimmedAlias == "" {
+		return name
+	}
+	return fmt.Sprintf("%s (%s)", name, trimmedAlias)
 }
 
 func (p *Processor) executeRecordPayment(ctx context.Context, msg InboundMessage, raw RawIntent, a RecordPaymentAction) (Reply, error) {
@@ -1164,7 +1201,7 @@ func (p *Processor) executeRecordPayment(ctx context.Context, msg InboundMessage
 	target, err := p.oldestOutstandingDebt(ctx, msg.UserID, a.CustomerID)
 	if err != nil {
 		if errors.Is(err, errNoOutstandingDebt) {
-			text, err := p.phrase(ctx, PhraseInput{Event: EventNoOutstandingDebt, Language: raw.Language, CustomerName: c.Name})
+			text, err := p.phrase(ctx, PhraseInput{Event: EventNoOutstandingDebt, Language: raw.Language, CustomerName: customerDisplayName(c.Name, c.Alias)})
 			return textReply(text), err
 		}
 		return Reply{}, err
@@ -1193,7 +1230,7 @@ func (p *Processor) executeRecordPayment(ctx context.Context, msg InboundMessage
 	text, err := p.phrase(ctx, PhraseInput{
 		Event:            EventPaymentRecorded,
 		Language:         raw.Language,
-		CustomerName:     c.Name,
+		CustomerName:     customerDisplayName(c.Name, c.Alias),
 		AmountMinor:      &result.Payment.AmountMinor,
 		OutstandingMinor: &outstandingMinor,
 	})
@@ -1303,7 +1340,7 @@ func (p *Processor) executeGetCustomerBalance(ctx context.Context, msg InboundMe
 		}
 		outstanding += d.Amount.MinorUnits() - paid
 	}
-	text, err := p.phrase(ctx, PhraseInput{Event: EventCustomerBalance, Language: raw.Language, CustomerName: c.Name, OutstandingMinor: &outstanding})
+	text, err := p.phrase(ctx, PhraseInput{Event: EventCustomerBalance, Language: raw.Language, CustomerName: customerDisplayName(c.Name, c.Alias), OutstandingMinor: &outstanding})
 	return textReply(text), err
 }
 
@@ -1323,7 +1360,7 @@ func (p *Processor) executeGetCustomerStatement(ctx context.Context, msg Inbound
 		return Reply{}, err
 	}
 	if len(debts) == 0 {
-		return textReply(fmt.Sprintf(fixedText(noStatementHistoryText, raw.Language), c.Name)), nil
+		return textReply(fmt.Sprintf(fixedText(noStatementHistoryText, raw.Language), customerDisplayName(c.Name, c.Alias))), nil
 	}
 
 	lines := make([]statementDebtLine, len(debts))
@@ -1351,7 +1388,7 @@ func (p *Processor) executeGetCustomerStatement(ctx context.Context, msg Inbound
 		}
 	}
 
-	return textReply(formatCustomerStatement(c.Name, lines, outstandingMinor, raw.Language)), nil
+	return textReply(formatCustomerStatement(customerDisplayName(c.Name, c.Alias), lines, outstandingMinor, raw.Language)), nil
 }
 
 // executeCreateReminder is docs/BRIEF-disambiguation-reminders-
@@ -1382,7 +1419,7 @@ func (p *Processor) executeCreateReminder(ctx context.Context, msg InboundMessag
 	target, err := p.oldestOutstandingDebt(ctx, msg.UserID, a.CustomerID)
 	if err != nil {
 		if errors.Is(err, errNoOutstandingDebt) {
-			text, err := p.phrase(ctx, PhraseInput{Event: EventNoOutstandingDebt, Language: raw.Language, CustomerName: c.Name})
+			text, err := p.phrase(ctx, PhraseInput{Event: EventNoOutstandingDebt, Language: raw.Language, CustomerName: customerDisplayName(c.Name, c.Alias)})
 			return textReply(text), err
 		}
 		return Reply{}, err
@@ -1393,7 +1430,7 @@ func (p *Processor) executeCreateReminder(ctx context.Context, msg InboundMessag
 	if _, err := p.cfg.Reminders.ScheduleTraderReminders(ctx, target.ID, msg.UserID, a.ReminderDate); err != nil {
 		return Reply{}, err
 	}
-	return textReply(fmt.Sprintf(fixedText(standaloneReminderScheduledText, raw.Language), c.Name, a.ReminderDate.Format(dueDateDisplayFormat))), nil
+	return textReply(fmt.Sprintf(fixedText(standaloneReminderScheduledText, raw.Language), customerDisplayName(c.Name, c.Alias), a.ReminderDate.Format(dueDateDisplayFormat))), nil
 }
 
 // executeCancelReminder is Tier 2c's CANCEL_REMINDER — cancels every
@@ -1426,9 +1463,9 @@ func (p *Processor) executeCancelReminder(ctx context.Context, msg InboundMessag
 		cancelled += n
 	}
 	if cancelled == 0 {
-		return textReply(fmt.Sprintf(fixedText(noReminderScheduledText, raw.Language), c.Name)), nil
+		return textReply(fmt.Sprintf(fixedText(noReminderScheduledText, raw.Language), customerDisplayName(c.Name, c.Alias))), nil
 	}
-	return textReply(fmt.Sprintf(fixedText(reminderCancelledText, raw.Language), c.Name)), nil
+	return textReply(fmt.Sprintf(fixedText(reminderCancelledText, raw.Language), customerDisplayName(c.Name, c.Alias))), nil
 }
 
 // executeListCustomers is built deterministically in Go, not phrased by
@@ -1445,9 +1482,14 @@ func (p *Processor) executeListCustomers(ctx context.Context, msg InboundMessage
 	if len(customers) == 0 {
 		return textReply(fixedText(noCustomersText, raw.Language)), nil
 	}
+	// docs/BRIEF-research-hardening-standard.md Part 5 live-testing
+	// finding #2's audit: two same-named customers must never print
+	// identically with nothing to tell them apart — customerDisplayName
+	// appends the alias whenever one is on file, same as the
+	// debt-created/payment-recorded confirmations already do.
 	names := make([]string, len(customers))
 	for i, c := range customers {
-		names[i] = c.Name
+		names[i] = customerDisplayName(c.Name, c.Alias)
 	}
 	return textReply(formatCustomerList(names, raw.Language)), nil
 }
@@ -1483,7 +1525,10 @@ func (p *Processor) executeListOutstandingDebts(ctx context.Context, msg Inbound
 			return Reply{}, err
 		}
 		outstandingMinor := d.Amount.MinorUnits() - paid
-		lines[i] = outstandingDebtLine{customerID: d.CustomerID, customerName: c.Name, outstandingMinor: outstandingMinor, dueDate: d.DueDate}
+		// Same audit as executeListCustomers above: two different
+		// customers named "Chinedu" must not appear as two identically-
+		// labeled groups with nothing distinguishing them.
+		lines[i] = outstandingDebtLine{customerID: d.CustomerID, customerName: customerDisplayName(c.Name, c.Alias), outstandingMinor: outstandingMinor, dueDate: d.DueDate}
 		totalMinor += outstandingMinor
 	}
 

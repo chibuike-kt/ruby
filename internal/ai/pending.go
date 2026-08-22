@@ -55,6 +55,13 @@ type PendingCandidateOption struct {
 	Name       string
 	Phone      string
 	Hint       string
+	// HintKind labels what Hint actually is (alias, phone, last item
+	// description, or creation date) — docs/BRIEF-research-hardening-
+	// standard.md Part 5 live-testing finding #2: an unlabeled hint
+	// string lets an alias ("Atlas") and an item description ("two
+	// cartons of noodles") render identically, misreading a person's
+	// nickname as something they bought.
+	HintKind customer.HintKind
 }
 
 // PendingOriginalMessage preserves a trader's original message verbatim
@@ -166,6 +173,17 @@ type PendingAction struct {
 // of Ruby already uses — after this long without a reply, Ruby should
 // ask fresh rather than resume a stale exchange.
 const DefaultPendingTTL = customer.DefaultLastCustomerContextTTL
+
+// ReminderOptInPendingTTL is deliberately much longer than
+// DefaultPendingTTL — docs/BRIEF-research-hardening-standard.md Part 5
+// live-testing finding #4: a "Yes, remind them" button sent right after
+// a debt-created confirmation isn't part of an active back-and-forth
+// the trader might have abandoned (unlike a slot-fill question or a
+// same/new prompt); it's a standalone yes/no offer that legitimately
+// sits unanswered on a trader's phone for a while. A tap 21 minutes
+// later — past DefaultPendingTTL's 10-minute window — was falling
+// through to the generic help fallback instead of a real answer.
+const ReminderOptInPendingTTL = 24 * time.Hour
 
 func pendingKey(userID int64) string {
 	return fmt.Sprintf("ruby:ctx:%d:pending", userID)
