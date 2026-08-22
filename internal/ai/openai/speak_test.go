@@ -33,4 +33,18 @@ func TestSpeaker_Live_RealAPICall(t *testing.T) {
 	if mimeType != speechMimeType {
 		t.Fatalf("got mime type %q, want %q", mimeType, speechMimeType)
 	}
+	// The whole reason this codebase requests response_format=opus
+	// (docs/BRIEF-research-hardening-standard.md Part 5 live-testing):
+	// only a genuine Ogg container renders as a real WhatsApp voice-note
+	// bubble, not a downloadable file attachment. "OggS" is Ogg's own
+	// magic number — verifying it here means a future response-format
+	// change that silently starts returning bare Opus frames (no
+	// container) fails this test instead of shipping unnoticed.
+	if len(audio) < 4 || string(audio[:4]) != "OggS" {
+		got := audio
+		if len(got) > 4 {
+			got = got[:4]
+		}
+		t.Fatalf("got audio starting with %q, want the Ogg container magic bytes \"OggS\"", got)
+	}
 }

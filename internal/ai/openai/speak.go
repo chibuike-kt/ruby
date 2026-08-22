@@ -20,15 +20,22 @@ import (
 // standard.md Part 5 live-testing finding #3's root cause, caught only
 // once real Error-level logging was in place.
 const speechModel = "gpt-4o-mini-tts"
-const speechVoice = "alloy"
+const speechVoice = "nova"
 
-// speechMimeType is AAC (docs/BRIEF-research-hardening-standard.md Part
-// 5 Tier 1's voice replies): WhatsApp's Cloud API accepts it for an
-// outbound audio message, and unlike OGG/Opus it needs no transcoding
-// step on the way out — Ruby only transcodes on the way in (see
-// internal/ai/ffmpeg), because that direction has no choice: WhatsApp
-// voice notes are always OGG/Opus and gpt-transcribe doesn't accept it.
-const speechMimeType = "audio/aac"
+// speechResponseFormat and speechMimeType are OGG/Opus, not AAC —
+// docs/BRIEF-research-hardening-standard.md Part 5 live-testing: AAC
+// uploads fine but WhatsApp only renders a genuine voice-note bubble
+// (waveform, inline playback) for audio/ogg with the Opus codec; any
+// other format, AAC included, displays as a plain downloadable file
+// attachment, defeating the point of a voice reply. Verified live
+// (2026-08-22) that response_format=opus from /v1/audio/speech returns
+// a real Ogg container — the response starts with the "OggS" magic
+// bytes followed by an OpusHead chunk, not bare Opus frames — so these
+// bytes are passed straight through to WhatsApp with no repackaging
+// step (unlike the inbound direction, internal/ai/ffmpeg, which exists
+// only because gpt-transcribe can't accept Ogg/Opus itself).
+const speechResponseFormat = "opus"
+const speechMimeType = "audio/ogg; codecs=opus"
 
 // maxSpeechBytes matches WhatsApp's own outbound audio message cap (16MB) —
 // a reply this codebase phrases is always a short sentence or two, well
@@ -56,7 +63,7 @@ func (s *Speaker) Speak(ctx context.Context, text string) ([]byte, string, error
 		Model:          speechModel,
 		Input:          text,
 		Voice:          speechVoice,
-		ResponseFormat: "aac",
+		ResponseFormat: speechResponseFormat,
 	})
 	if err != nil {
 		return nil, "", err

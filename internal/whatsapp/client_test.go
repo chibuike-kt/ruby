@@ -398,7 +398,7 @@ func TestTruncateTitle_ExactlyAtLimitUnchanged(t *testing.T) {
 // references), then a second call sends the audio message referencing
 // that id — the outbound mirror of DownloadMedia's upload-free GET.
 func TestSendAudioFlow_UploadThenSend_Success(t *testing.T) {
-	var uploadedType, uploadedAuth string
+	var uploadedType, uploadedAuth, uploadedFilePartContentType string
 	var uploadedBytes []byte
 	var sentPath, sentTo, sentMediaID string
 
@@ -412,10 +412,11 @@ func TestSendAudioFlow_UploadThenSend_Success(t *testing.T) {
 				t.Fatalf("parse multipart form: %v", err)
 			}
 			uploadedType = r.FormValue("type")
-			file, _, err := r.FormFile("file")
+			file, header, err := r.FormFile("file")
 			if err != nil {
 				t.Fatalf("read uploaded file: %v", err)
 			}
+			uploadedFilePartContentType = header.Header.Get("Content-Type")
 			defer func() { _ = file.Close() }()
 			data, err := io.ReadAll(file)
 			if err != nil {
@@ -453,6 +454,14 @@ func TestSendAudioFlow_UploadThenSend_Success(t *testing.T) {
 	}
 	if uploadedType != "audio/aac" {
 		t.Fatalf("got uploaded type %q, want audio/aac", uploadedType)
+	}
+	// The specifically-named cause of Meta's media-upload error 131053
+	// ("parameter type does not match file MIME type"): the file part's
+	// own Content-Type header must actually match the declared "type"
+	// field, not silently default to multipart's usual
+	// application/octet-stream (what CreateFormFile alone would send).
+	if uploadedFilePartContentType != "audio/aac" {
+		t.Fatalf("got file part Content-Type %q, want audio/aac (must match the declared \"type\" field, not application/octet-stream)", uploadedFilePartContentType)
 	}
 	if string(uploadedBytes) != "aac-bytes" {
 		t.Fatalf("got uploaded bytes %q, want aac-bytes", uploadedBytes)
