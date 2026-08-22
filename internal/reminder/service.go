@@ -48,7 +48,7 @@ func NewService(pool *pgxpool.Pool, sender TemplateSender, customerTemplateName,
 // OptIn schedules the two customer reminders a trader's "yes" answer
 // requires (docs/BRIEF-fixes-and-reminders.md #4).
 func (s *Service) OptIn(ctx context.Context, debtID, customerID int64, dueDate time.Time) ([]Reminder, error) {
-	return ScheduleCustomer(ctx, s.pool, debtID, customerID, dueDate, s.customerTemplateName)
+	return ScheduleCustomer(ctx, s.pool, debtID, customerID, dueDate, s.customerTemplateName, time.Now())
 }
 
 // ScheduleTraderReminders schedules the two automatic trader reminders
@@ -62,7 +62,7 @@ func (s *Service) OptIn(ctx context.Context, debtID, customerID int64, dueDate t
 // same day-before/day-of scheduling shape, just invoked at a different
 // point in the conversation and off a different date source.
 func (s *Service) ScheduleTraderReminders(ctx context.Context, debtID, userID int64, dueDate time.Time) ([]Reminder, error) {
-	return ScheduleTrader(ctx, s.pool, debtID, userID, dueDate, s.traderTemplateName)
+	return ScheduleTrader(ctx, s.pool, debtID, userID, dueDate, s.traderTemplateName, time.Now())
 }
 
 // CancelForDebt cancels every scheduled reminder attached to debtID —

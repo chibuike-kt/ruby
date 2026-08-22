@@ -7,11 +7,12 @@ import (
 	"github.com/chibuike-kt/ruby/internal/db"
 )
 
-// ScheduleCustomer creates the two reminders the debt-creation opt-in
-// requires (docs/BRIEF-fixes-and-reminders.md #4): one the day before
-// dueDate, one on dueDate itself, sent to the customer.
-func ScheduleCustomer(ctx context.Context, q db.Querier, debtID, customerID int64, dueDate time.Time, template string) ([]Reminder, error) {
-	return schedule(ctx, q, debtID, RecipientCustomer, customerID, dueDate, template)
+// ScheduleCustomer creates the reminders the debt-creation opt-in
+// requires (docs/BRIEF-fixes-and-reminders.md #4): normally one the day
+// before dueDate and one on dueDate itself, sent to the customer — see
+// schedule's own doc comment for when the day-before one is skipped.
+func ScheduleCustomer(ctx context.Context, q db.Querier, debtID, customerID int64, dueDate time.Time, template string, now time.Time) ([]Reminder, error) {
+	return schedule(ctx, q, debtID, RecipientCustomer, customerID, dueDate, template, now)
 }
 
 // ScheduleTrader creates the same day-before/due-date pair sent to the
@@ -19,12 +20,27 @@ func ScheduleCustomer(ctx context.Context, q db.Querier, debtID, customerID int6
 // (docs/BRIEF-critical-fixes-and-reminders.md's full reminder system:
 // "this is the trader's own data reflected back to them, no separate
 // consent needed").
-func ScheduleTrader(ctx context.Context, q db.Querier, debtID, userID int64, dueDate time.Time, template string) ([]Reminder, error) {
-	return schedule(ctx, q, debtID, RecipientTrader, userID, dueDate, template)
+func ScheduleTrader(ctx context.Context, q db.Querier, debtID, userID int64, dueDate time.Time, template string, now time.Time) ([]Reminder, error) {
+	return schedule(ctx, q, debtID, RecipientTrader, userID, dueDate, template, now)
 }
 
-func schedule(ctx context.Context, q db.Querier, debtID int64, recipientType RecipientType, recipientID int64, dueDate time.Time, template string) ([]Reminder, error) {
-	times := []time.Time{dueDate.AddDate(0, 0, -1), dueDate}
+// schedule normally creates both the day-before and due-date reminders.
+// If dueDate is already today or earlier by the time it's being
+// scheduled (now), the day-before slot is skipped entirely — docs/
+// BRIEF-research-hardening-standard.md Part 5 live-testing finding #4:
+// a debt due today would otherwise get a "day before" reminder whose
+// scheduled time (yesterday) is already overdue, so it fires in the
+// very same dispatch pass as the due-today one. Both are technically
+// correct by date arithmetic, but landing in the trader's or customer's
+// WhatsApp within the same second reads as spam, not two genuinely
+// distinct nudges — one reminder for an already-today debt is enough.
+func schedule(ctx context.Context, q db.Querier, debtID int64, recipientType RecipientType, recipientID int64, dueDate time.Time, template string, now time.Time) ([]Reminder, error) {
+	times := []time.Time{}
+	if dayBefore := dueDate.AddDate(0, 0, -1); dueDate.After(now) {
+		times = append(times, dayBefore)
+	}
+	times = append(times, dueDate)
+
 	out := make([]Reminder, 0, len(times))
 	for _, at := range times {
 		r, err := insert(ctx, q, debtID, recipientType, recipientID, at, template)
