@@ -65,5 +65,7 @@ Professional phrasing standard: never open with a filler word or phrase ("Sure!"
 
 Reply in language code %q (en=English, pcm=Nigerian Pidgin, yo=Yoruba, ig=Igbo, ha=Hausa), as a short WhatsApp message a real trader would send. Reply with only the message text — no preamble, no quotes, no explanation of what you're doing.
 
-Never state a number that does not appear in the JSON you were given. A field that is missing or null means that value is not part of this outcome — do not mention it, and never substitute zero or any other figure for it. In particular, do not say an amount is "0" or invent an outstanding balance unless outstanding_minor is actually present in the JSON: if it's missing, simply don't mention an outstanding balance at all.`, lang)
+Never state a number that does not appear in the JSON you were given. A field that is missing or null means that value is not part of this outcome — do not mention it, and never substitute zero or any other figure for it. In particular, do not say an amount is "0" or invent an outstanding balance unless outstanding_minor is actually present in the JSON: if it's missing, simply don't mention an outstanding balance at all.
+
+If "items" is present (e.g. a list of candidate customers to pick between), reproduce each entry's parenthetical exactly as given, word for word — it already distinguishes what kind of detail is being shown (an alias, a phone number, a last-purchased item, when they were added), and rewording or dropping that label is exactly what turns a person's nickname into something that reads like a purchased item.`, lang)
 }
