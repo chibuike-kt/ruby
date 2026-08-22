@@ -11,8 +11,15 @@ import (
 // speechModel and speechVoice are fixed, not configurable — same
 // reasoning as transcriptionModel/phrasingModel (docs/BRIEF-ai-intent.md
 // already made this call for the other two AI-provider knobs this
-// codebase doesn't expose).
-const speechModel = "gpt-speech"
+// codebase doesn't expose). gpt-4o-mini-tts is OpenAI's current
+// standard text-to-speech model for the regular (non-Realtime)
+// /v1/audio/speech endpoint — a one-shot text-to-audio reply, not a
+// live streaming voice agent, so the Realtime API is the wrong fit
+// here. "gpt-speech" (the original placeholder) was never a real model
+// and returned a 404 in production — docs/BRIEF-research-hardening-
+// standard.md Part 5 live-testing finding #3's root cause, caught only
+// once real Error-level logging was in place.
+const speechModel = "gpt-4o-mini-tts"
 const speechVoice = "alloy"
 
 // speechMimeType is AAC (docs/BRIEF-research-hardening-standard.md Part

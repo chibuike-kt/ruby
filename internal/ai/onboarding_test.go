@@ -33,6 +33,13 @@ func TestProcessor_Onboarding_FirstContact_AsksForName(t *testing.T) {
 	if !strings.Contains(reply.Text, "call you") {
 		t.Fatalf("got reply %q, want the name question combined into the same message", reply.Text)
 	}
+	// docs/BRIEF-research-hardening-standard.md Part 5 live-testing
+	// finding #3: OpenAI's usage policy requires disclosing that a
+	// synthesized voice is AI-generated — said once here, the one
+	// guaranteed touchpoint before Ruby could ever send a voice reply.
+	if !strings.Contains(reply.Text, "AI-generated") {
+		t.Fatalf("got reply %q, want it to disclose that a voice reply is AI-generated, not a real person", reply.Text)
+	}
 	if len(reply.Buttons) != 3 {
 		t.Fatalf("got %d buttons, want the 3 quick-action buttons still attached", len(reply.Buttons))
 	}

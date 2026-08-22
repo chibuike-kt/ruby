@@ -141,12 +141,27 @@ var nameQuestionText = map[Language]string{
 	LangHausa:   "Da farko — me zan kira ka?",
 }
 
+// voiceDisclosureText satisfies OpenAI's usage-policy requirement to
+// disclose that a synthesized voice is AI-generated, not a real person
+// (docs/BRIEF-research-hardening-standard.md Part 5 live-testing
+// finding #3) — said once, here, rather than repeated on every voice
+// reply: the first-contact message is the one guaranteed touchpoint
+// every trader sees before Ruby could ever send them a voice note.
+var voiceDisclosureText = map[Language]string{
+	LangEnglish: "If I ever reply with a voice note, that voice is AI-generated, not a real person.",
+	LangPidgin:  "If I ever reply with voice note, dat voice na AI-generated, e no be real person.",
+	LangYoruba:  "Bí mo bá dá ohùn padà fún ọ nígbàkigbà, ohùn yẹn jẹ́ ti AI, kì í ṣe ẹni gidi.",
+	LangIgbo:    "Ọ bụrụ na m ji olu zaghachi gị mgbe ọ bụla, olu ahụ bụ nke AI mepụtara, ọ bụghị onye mmadụ n'ezie.",
+	LangHausa:   "Idan na taɓa amsawa da saƙon murya, wannan muryar AI ce ta ƙirƙira, ba mutum na gaske ba ce.",
+}
+
 // firstContactReply is what a brand-new (nameless) account gets on its
-// very first message: the same intro as greetingReply, plus the name
-// question, in one message — never a separate follow-up turn.
+// very first message: the same intro as greetingReply, plus the voice
+// disclosure and the name question, in one message — never a separate
+// follow-up turn.
 func firstContactReply(lang Language) Reply {
 	r := greetingReply(lang)
-	r.Text = r.Text + " " + fixedText(nameQuestionText, lang)
+	r.Text = r.Text + " " + fixedText(voiceDisclosureText, lang) + " " + fixedText(nameQuestionText, lang)
 	return r
 }
 
