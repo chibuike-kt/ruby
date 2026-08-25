@@ -1,5 +1,7 @@
 # Ruby
 
+An AI-powered bookkeeping assistant for informal traders who sell on credit, running entirely on WhatsApp. Ruby sees, hears, speaks, and understands English, Nigerian Pidgin, Yoruba, Igbo, and Hausa.
+
 ## Team Members
 
 * Kingsley Chibueze
@@ -10,7 +12,7 @@
 
 * Message Ruby directly on WhatsApp: https://api.whatsapp.com/send?phone=2347048700500&text=Hi%20Ruby
 * Marketing site (secondary, not the product itself): https://ruby-flax-two.vercel.app/
-* Recorded Demo: [Link to your Loom walkthrough]
+* Recorded Demo: https://www.loom.com/share/46888dc2e9b54e88812093265d2f2839
 
 ## 🎯 The Problem
 
@@ -56,10 +58,12 @@ A quick reference for anyone reviewing the codebase directly.
 
 * Frontend: Next.js (App Router), React, Tailwind CSS, Framer Motion
 * Backend: Go, PostgreSQL, Redis
-* AI and APIs: OpenAI (structured intent extraction and voice transcription), Meta WhatsApp Cloud API
-* Infrastructure: Docker and Docker Compose for local orchestration, ngrok for tunneling the local backend to a public webhook URL during development
+* AI and APIs: OpenAI (structured intent extraction, voice transcription, and text-to-speech), Meta WhatsApp Cloud API
+* Infrastructure: Railway for production hosting (Postgres and Redis included), Docker and Docker Compose for local development, ngrok for tunneling the local backend during development only
 
 ## ⚙️ How to Set Up and Run Locally
+
+The live number above is the fastest way to actually evaluate Ruby, nothing below is required for that. These steps are only for running or modifying the code locally.
 
 This is the backend, the actual product: the API, the AI pipeline, and the WhatsApp integration. The marketing landing page lives in a separate repository and is linked at the top of this README under Live Demo, it is not required to run or evaluate Ruby itself.
 
